@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#090b12" />
+    <meta name="description" content="多智能体狼人杀实时观战与复盘控制台" />
+    <title>NOCTURNE · 狼人杀 Agent Arena</title>
+    <link rel="stylesheet" href="./styles.css?v=20261003-2" />
+  </head>
+  <body>
+    <div class="ambient ambient-one" aria-hidden="true"></div>
+    <div class="ambient ambient-two" aria-hidden="true"></div>
+
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">
+            <span class="moon"></span>
+            <span class="fang">W</span>
+          </div>
+          <div>
+            <strong>NOCTURNE</strong>
+            <span>Agent Arena</span>
+          </div>
+        </div>
+
+        <button class="primary create-button" id="open-create" type="button">
+          <span class="button-icon">＋</span>
+          创建新对局
+        </button>
+
+        <nav class="main-nav" aria-label="主导航">
+          <button class="nav-item active" data-view="arena" type="button">
+            <span class="nav-icon">◉</span>
+            <span>实时对局</span>
+            <span class="live-dot" id="nav-live-dot" hidden></span>
+          </button>
+          <button class="nav-item" data-view="replay" type="button">
+            <span class="nav-icon">↺</span>
+            <span>复盘中心</span>
+          </button>
+          <button class="nav-item" data-view="leaderboard" type="button">
+            <span class="nav-icon">♜</span>
+            <span>竞技榜单</span>
+          </button>
+        </nav>
+
+        <div class="side-label">当前对局</div>
+        <div class="game-mini-card" id="game-mini-card">
+          <div class="mini-empty">
+            <span>尚未连接对局</span>
+            <small>创建或等待后端恢复</small>
+          </div>
+        </div>
+
+        <div class="sidebar-spacer"></div>
+        <div class="connection-card">
+          <span class="connection-indicator connecting" id="connection-indicator"></span>
+          <div>
+            <strong id="connection-label">正在连接</strong>
+            <small id="connection-detail">检查对局服务…</small>
+          </div>
+          <button class="icon-button compact" id="retry-connection" type="button" title="重新连接" aria-label="重新连接">↻</button>
+        </div>
+        <p class="build-mark">MULTI-AGENT LAB · V1.0</p>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <button class="icon-button mobile-menu" id="mobile-menu" type="button" aria-label="展开菜单">☰</button>
+          <div class="breadcrumb">
+            <span>Agent Arena</span>
+            <span class="slash">/</span>
+            <strong id="page-title">实时对局</strong>
+          </div>
+          <div class="top-actions">
+            <label class="view-select-wrap" title="选择信息视角">
+              <span>视角</span>
+              <select id="perspective-select" aria-label="信息视角">
+                <option value="observer">全知观战</option>
+                <option value="public">公共视角</option>
+              </select>
+            </label>
+            <button class="icon-button" id="sound-toggle" type="button" title="事件提示音" aria-label="开关事件提示音">♬</button>
+            <button class="icon-button" id="theme-toggle" type="button" title="降低视觉效果" aria-label="切换视觉效果">◐</button>
+          </div>
+        </header>
+
+        <section class="page active" id="arena-page" data-page="arena">
+          <div class="match-header">
+            <div class="match-title-group">
+              <div class="eyebrow-row">
+                <span class="status-pill waiting" id="match-status"><i></i> 等待对局</span>
+                <span class="match-id" id="match-id">—</span>
+              </div>
+              <h1 id="phase-heading">夜幕尚未降临</h1>
+              <p id="phase-subtitle">创建一场对局，观察不同角色 Agent 在信息隔离下推理与博弈。</p>
+            </div>
+            <div class="round-block" id="round-block">
+              <span>ROUND</span>
+              <strong id="round-number">00</strong>
+              <em id="phase-label">准备</em>
+            </div>
+          </div>
+
+          <div class="phase-track" id="phase-track" aria-label="对局阶段">
+            <div class="phase-node active" data-phase="setup"><i>1</i><span>初始化</span></div>
+            <div class="phase-line"></div>
+            <div class="phase-node" data-phase="night"><i>2</i><span>夜间行动</span></div>
+            <div class="phase-line"></div>
+            <div class="phase-node" data-phase="day"><i>3</i><span>公布结果</span></div>
+            <div class="phase-line"></div>
+            <div class="phase-node" data-phase="discussion"><i>4</i><span>自由发言</span></div>
+            <div class="phase-line"></div>
+            <div class="phase-node" data-phase="vote"><i>5</i><span>放逐投票</span></div>
+          </div>
+
+          <div class="arena-layout">
+            <section class="panel game-stage-panel">
+              <div class="panel-heading stage-heading">
+                <div>
+                  <span class="kicker">LIVE TABLE</span>
+                  <h2>Agent 对局席</h2>
+                </div>
+                <div class="stage-tools">
+                  <button class="chip active" data-overlay="identity" type="button">身份</button>
+                  <button class="chip" data-overlay="team" type="button">阵营</button>
+                  <button class="chip" data-overlay="alive" type="button">生死</button>
+                </div>
+              </div>
+
+              <div class="stage-wrap" id="stage-wrap">
+                <div class="seat-ring" id="seat-ring" aria-label="玩家座位">
+                  <div class="stage-center" id="stage-center">
+                    <div class="orbit orbit-one"></div>
+                    <div class="orbit orbit-two"></div>
+                    <div class="phase-emblem" id="phase-emblem">◑</div>
+                    <span id="center-kicker">WAITING</span>
+                    <strong id="center-title">等待开局</strong>
+                    <small id="center-hint">No active match</small>
+                  </div>
+                </div>
+              </div>
+
+              <div class="stage-footer">
+                <div class="legend" id="team-legend">
+                  <span><i class="team-dot good"></i> 好人阵营</span>
+                  <span><i class="team-dot wolf"></i> 狼人阵营</span>
+                  <span><i class="team-dot unknown"></i> 身份未知</span>
+                </div>
+                <div class="stage-actions">
+                  <label class="speed-control">
+                    <span>速度</span>
+                    <select id="speed-select" aria-label="自动运行速度">
+                      <option value="1600">沉浸</option>
+                      <option value="850" selected>标准</option>
+                      <option value="250">极速</option>
+                    </select>
+                  </label>
+                  <button class="secondary action-button" id="step-game" type="button" disabled><span>→</span> 推进一步</button>
+                  <button class="primary action-button" id="run-game" type="button" disabled><span id="run-icon">▶</span> <span id="run-label">自动运行</span></button>
+                </div>
+              </div>
+            </section>
+
+            <aside class="panel timeline-panel">
+              <div class="panel-heading">
+                <div>
+                  <span class="kicker">EVENT STREAM</span>
+                  <h2>实时事件</h2>
+                </div>
+                <span class="event-count" id="event-count">0</span>
+              </div>
+              <div class="timeline-filter" role="group" aria-label="事件筛选">
+                <button class="active" data-event-filter="all" type="button">全部</button>
+                <button data-event-filter="speech" type="button">发言</button>
+                <button data-event-filter="action" type="button">行动</button>
+                <button data-event-filter="vote" type="button">投票</button>
+              </div>
+              <div class="event-stream" id="event-stream" aria-live="polite">
+                <div class="empty-state compact-empty">
+                  <span class="empty-glyph">⌁</span>
+                  <strong>等待第一条事件</strong>
+                  <p>Agent 的行动、发言和规则裁决会依次出现在这里。</p>
+                </div>
+              </div>
+              <button class="text-button timeline-bottom" id="jump-latest" type="button">跳至最新 ↓</button>
+            </aside>
+          </div>
+
+          <section class="human-turn panel" id="human-turn" hidden>
+            <div class="human-turn-copy">
+              <span class="kicker">YOUR TURN</span>
+              <h2 id="human-prompt">等待你的行动</h2>
+              <p id="human-description">从合法行动中选择一项，系统不会向其他玩家暴露你的私有信息。</p>
+            </div>
+            <div class="human-actions" id="human-actions"></div>
+            <form class="human-composer" id="human-composer" hidden>
+              <div class="composer-heading">
+                <label for="human-content" id="human-content-label">输入行动内容</label>
+                <span id="human-content-count" aria-live="polite">0 / 500</span>
+              </div>
+              <textarea id="human-content" name="human_content" rows="3" maxlength="500" autocomplete="off" placeholder="输入你的发言…" aria-describedby="human-content-hint" required></textarea>
+              <div class="composer-footer">
+                <small id="human-content-hint">内容会随本次行动一起提交。Ctrl / ⌘ + Enter 快速提交，Esc 取消。</small>
+                <div class="composer-actions">
+                  <button class="secondary action-button" id="cancel-human-content" type="button">取消</button>
+                  <button class="primary action-button" id="submit-human-content" type="submit" disabled>提交发言</button>
+                </div>
+              </div>
+            </form>
+          </section>
+
+          <div class="insight-grid">
+            <section class="panel conversation-panel">
+              <div class="panel-heading">
+                <div>
+                  <span class="kicker">PUBLIC CHANNEL</span>
+                  <h2>发言实录</h2>
+                </div>
+                <button class="text-button" id="export-log" type="button">导出日志 ↗</button>
+              </div>
+              <div class="conversation-list" id="conversation-list">
+                <div class="empty-state inline-empty">
+                  <span class="empty-glyph">“</span>
+                  <div><strong>尚无公开发言</strong><p>进入白天讨论后，Agent 的发言会在此展开。</p></div>
+                </div>
+              </div>
+            </section>
+
+            <section class="panel metrics-panel">
+              <div class="panel-heading">
+                <div>
+                  <span class="kicker">LIVE EVALUATION</span>
+                  <h2>过程测评</h2>
+                </div>
+                <span class="model-tag" id="model-tag">Heuristic</span>
+              </div>
+              <div class="metrics-content" id="metrics-content">
+                <div class="metric-ring" style="--score: 0">
+                  <div><strong id="overall-score">—</strong><span>综合表现</span></div>
+                </div>
+                <div class="metric-bars" id="metric-bars">
+                  <div class="metric-row"><div><span>推理一致性</span><b>—</b></div><progress max="100" value="0"></progress></div>
+                  <div class="metric-row"><div><span>阵营协同度</span><b>—</b></div><progress max="100" value="0"></progress></div>
+                  <div class="metric-row"><div><span>投票命中率</span><b>—</b></div><progress max="100" value="0"></progress></div>
+                  <div class="metric-row"><div><span>信息利用率</span><b>—</b></div><progress max="100" value="0"></progress></div>
+                </div>
+              </div>
+              <div class="turning-point" id="turning-point">
+                <span>关键节点</span>
+                <p>对局开始后，将基于事件序列识别局势转折。</p>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section class="page" id="replay-page" data-page="replay">
+          <div class="section-hero">
+            <div><span class="kicker">POST-GAME ANALYSIS</span><h1>复盘中心</h1><p>从结构化事件中还原每一次判断、技能与票型转折。</p></div>
+            <button class="primary action-button" id="open-current-replay" type="button" disabled>复盘当前对局</button>
+          </div>
+          <div class="replay-layout">
+            <section class="panel replay-list-panel">
+              <div class="panel-heading"><div><span class="kicker">MATCH HISTORY</span><h2>最近对局</h2></div><span class="event-count" id="history-count">0</span></div>
+              <div id="replay-list" class="replay-list">
+                <div class="empty-state"><span class="empty-glyph">↺</span><strong>还没有可复盘的对局</strong><p>完成一场比赛后，胜负、关键事件和量化归因将保存在这里。</p></div>
+              </div>
+            </section>
+            <section class="panel attribution-panel">
+              <div class="panel-heading"><div><span class="kicker">CAUSAL TRACE</span><h2>局势归因</h2></div></div>
+              <div class="attribution-empty" id="attribution-content">
+                <div class="trace-line"></div><span>选择一场对局以查看复盘</span>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section class="page" id="leaderboard-page" data-page="leaderboard">
+          <div class="section-hero">
+            <div><span class="kicker">AGENT BENCHMARK</span><h1>竞技榜单</h1><p>以角色轮换和阵营 Elo 公平比较不同模型与策略版本。</p></div>
+            <button class="secondary action-button" id="refresh-leaderboard" type="button">刷新榜单 ↻</button>
+          </div>
+          <div class="leader-summary">
+            <div class="summary-card"><span>已记录对局</span><strong id="total-games">0</strong><small>评测样本</small></div>
+            <div class="summary-card accent"><span>最高 Elo</span><strong id="top-elo">—</strong><small id="top-agent">暂无数据</small></div>
+            <div class="summary-card"><span>参赛 Agent</span><strong id="agent-count">0</strong><small>模型 / 策略版本</small></div>
+          </div>
+          <section class="panel leaderboard-panel">
+            <div class="panel-heading"><div><span class="kicker">RANKING</span><h2>综合排名</h2></div><div class="role-tabs" id="role-tabs"><button class="active" data-role="all" type="button">综合</button><button data-role="werewolf" type="button">狼人</button><button data-role="seer" type="button">预言家</button><button data-role="witch" type="button">女巫</button><button data-role="villager" type="button">平民</button></div></div>
+            <div class="leader-table-wrap">
+              <table class="leader-table">
+                <thead><tr><th>排名</th><th>Agent / 版本</th><th>Elo</th><th>场次</th><th>胜率</th><th>趋势</th></tr></thead>
+                <tbody id="leaderboard-body"><tr><td colspan="6"><div class="table-empty">完成批量竞技后生成排行榜</div></td></tr></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <dialog class="create-dialog" id="create-dialog">
+      <form method="dialog" id="create-form">
+        <div class="dialog-head">
+          <div><span class="kicker">NEW SIMULATION</span><h2>创建 Agent 对局</h2><p>规则引擎将为每个 Agent 建立严格隔离的观察空间。</p></div>
+          <button class="icon-button" value="cancel" aria-label="关闭" type="submit">×</button>
+        </div>
+        <div class="form-section">
+          <label class="form-label">参赛模式</label>
+          <div class="mode-options">
+            <label class="mode-card selected"><input type="radio" name="mode" value="ai" checked /><span class="mode-icon">⌘</span><span><strong>纯 AI 对战</strong><small>所有座位由自治 Agent 驱动</small></span><i>✓</i></label>
+            <label class="mode-card"><input type="radio" name="mode" value="mixed" /><span class="mode-icon">♙</span><span><strong>人机混战</strong><small>保留一个座位供玩家决策</small></span><i>✓</i></label>
+          </div>
+        </div>
+        <div class="form-grid">
+          <label><span class="form-label">玩家人数</span><select name="player_count"><option value="6">6 人 · 快速局</option><option value="8" selected>8 人 · 标准局</option><option value="9">9 人 · 经典局</option><option value="12">12 人 · 完整局</option></select></label>
+          <label><span class="form-label">随机种子</span><input name="seed" type="number" min="0" placeholder="自动生成" /></label>
+          <label><span class="form-label">Agent 策略</span><select name="strategy" id="strategy-select"><option value="heuristic">Heuristic · 本地启发式</option><option value="mixed" disabled>Mixed · 需注入策略工厂</option><option value="deepseek" id="deepseek-option" disabled>DeepSeek · 等待服务器配置</option></select></label>
+          <label><span class="form-label">平票规则</span><select name="tie_rule"><option value="no_elimination">无人出局</option><option value="random">随机出局</option></select></label>
+        </div>
+        <div class="human-config" id="human-config" hidden>
+          <label><span class="form-label">你的昵称</span><input name="human_name" maxlength="16" value="观察员 01" /></label>
+          <label><span class="form-label">偏好座位</span><select name="human_seat"><option value="random">随机分配</option><option value="1">1 号位</option><option value="2">2 号位</option><option value="3">3 号位</option><option value="4">4 号位</option></select></label>
+        </div>
+        <div class="privacy-note"><span>◆</span><p><strong>信息隔离已启用</strong><br />私有查验、狼队沟通和药剂状态只会投影给对应角色；切换观战视角不会改变 Agent 的观察。</p></div>
+        <div class="dialog-actions"><button class="secondary action-button" value="cancel" type="submit">取消</button><button class="primary action-button" id="create-submit" value="default" type="submit"><span>✦</span> 创建并进入</button></div>
+      </form>
+    </dialog>
+
+    <dialog class="result-dialog" id="result-dialog">
+      <div class="result-glow"></div>
+      <div class="result-icon" id="result-icon">♜</div>
+      <span class="kicker">GAME COMPLETE</span>
+      <h2 id="result-title">对局结束</h2>
+      <p id="result-description">胜负已经裁定，完整结构化日志可用于复盘。</p>
+      <div class="result-stats" id="result-stats"></div>
+      <div class="dialog-actions"><button class="secondary action-button" id="close-result" type="button">留在现场</button><button class="primary action-button" id="go-replay" type="button">查看完整复盘</button></div>
+    </dialog>
+
+    <div class="toast-region" id="toast-region" aria-live="assertive"></div>
+    <div class="mobile-scrim" id="mobile-scrim"></div>
+
+    <script src="./app.js?v=20261003-3" defer></script>
+  </body>
+</html>
