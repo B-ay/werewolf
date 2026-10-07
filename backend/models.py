@@ -61,8 +61,19 @@ class Phase(str, Enum):
     NIGHT_WITCH_SAVE = "night_witch_save"
     NIGHT_WITCH_POISON = "night_witch_poison"
     NIGHT_RESOLVE = "night_resolve"
+    SHERIFF_RUN = "sheriff_run"
+    SHERIFF_SPEECH = "sheriff_speech"
+    SHERIFF_WITHDRAW = "sheriff_withdraw"
+    SHERIFF_VOTE = "sheriff_vote"
+    SHERIFF_PK_SPEECH = "sheriff_pk_speech"
+    SHERIFF_PK_VOTE = "sheriff_pk_vote"
+    DAWN_REVEAL = "dawn_reveal"
+    SHERIFF_BADGE = "sheriff_badge"
+    SHERIFF_ORDER = "sheriff_order"
     DAY_DISCUSSION = "day_discussion"
     DAY_VOTE = "day_vote"
+    DAY_PK_SPEECH = "day_pk_speech"
+    DAY_PK_VOTE = "day_pk_vote"
     HUNTER_SHOT = "hunter_shot"
     FINISHED = "finished"
 
@@ -70,7 +81,22 @@ class Phase(str, Enum):
     def public_name(self) -> str:
         if self.value.startswith("night_"):
             return "night"
-        if self in (Phase.DAY_DISCUSSION, Phase.DAY_VOTE):
+        if self in (
+            Phase.SHERIFF_RUN,
+            Phase.SHERIFF_SPEECH,
+            Phase.SHERIFF_WITHDRAW,
+            Phase.SHERIFF_VOTE,
+            Phase.SHERIFF_PK_SPEECH,
+            Phase.SHERIFF_PK_VOTE,
+        ):
+            return "sheriff_election"
+        if self in (
+            Phase.SHERIFF_ORDER,
+            Phase.DAY_DISCUSSION,
+            Phase.DAY_VOTE,
+            Phase.DAY_PK_SPEECH,
+            Phase.DAY_PK_VOTE,
+        ):
             return "day"
         return self.value
 
@@ -83,6 +109,14 @@ class ActionType(str, Enum):
     SPEAK = "speak"
     VOTE = "vote"
     HUNTER_SHOOT = "hunter_shoot"
+    SHERIFF_RUN = "sheriff_run"
+    SHERIFF_WITHDRAW = "sheriff_withdraw"
+    SHERIFF_VOTE = "sheriff_vote"
+    SHERIFF_ORDER_CLOCKWISE = "sheriff_order_clockwise"
+    SHERIFF_ORDER_COUNTERCLOCKWISE = "sheriff_order_counterclockwise"
+    SHERIFF_SUMMARIZE = "sheriff_summarize"
+    SHERIFF_TRANSFER = "sheriff_transfer"
+    SHERIFF_DESTROY = "sheriff_destroy"
     PASS = "pass"
 
     @classmethod
@@ -320,6 +354,7 @@ class GameConfig:
     witch_one_potion_per_night: bool = True
     allow_witch_self_save: bool = True
     hunter_can_shoot_if_poisoned: bool = False
+    enable_sheriff: bool = True
     discussion_rounds: int = 1
     max_rounds: int = 20
 
@@ -380,6 +415,7 @@ class GameConfig:
             "witch_one_potion_per_night": self.witch_one_potion_per_night,
             "allow_witch_self_save": self.allow_witch_self_save,
             "hunter_can_shoot_if_poisoned": self.hunter_can_shoot_if_poisoned,
+            "enable_sheriff": self.enable_sheriff,
             "discussion_rounds": self.discussion_rounds,
             "max_rounds": self.max_rounds,
         }

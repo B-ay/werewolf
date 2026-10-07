@@ -135,6 +135,34 @@ class ServerTests(unittest.TestCase):
             )
         )
 
+    def test_sheriff_config_defaults_on_and_can_be_disabled(self):
+        status, default_game = self.request(
+            "/api/games", "POST", {"player_count": 5, "seed": 905}
+        )
+        self.assertEqual(status, 201)
+        self.assertTrue(default_game["config"]["enable_sheriff"])
+        self.assertTrue(default_game["sheriff"]["enabled"])
+
+        status, disabled = self.request(
+            "/api/games",
+            "POST",
+            {"player_count": 5, "seed": 906, "enable_sheriff": False},
+        )
+        self.assertEqual(status, 201)
+        self.assertFalse(disabled["config"]["enable_sheriff"])
+        self.assertFalse(disabled["sheriff"]["enabled"])
+        self.assertEqual(disabled["sheriff"]["badge_status"], "void")
+
+        record = self.manager.require(disabled["game_id"])
+        record.game.run()
+        self.assertFalse(
+            any(
+                event.event_type.startswith("sheriff_election")
+                or event.event_type.startswith("sheriff_candidacy")
+                for event in record.game.events
+            )
+        )
+
     def test_llm_alias_and_missing_provider_validation_are_safe(self):
         alias_manager = ArenaManager(deepseek_provider=self.deepseek_provider)
         alias_state = alias_manager.create(

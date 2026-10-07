@@ -120,6 +120,34 @@ class WerewolfGame:
         self._after_hunter_phase: Optional[Phase] = None
         self._discussion_cycle = 1
 
+        # Sheriff is a public badge layered on top of a player's secret role.
+        # Election choices are deliberately buffered without events until each
+        # batch closes, so a later actor cannot condition their choice on an
+        # earlier actor's sealed decision.
+        self._sheriff_badge_status = "unassigned" if config.enable_sheriff else "void"
+        self._sheriff_holder: Optional[str] = None
+        self._sheriff_candidates: list[str] = []
+        self._sheriff_original_candidates: list[str] = []
+        self._sheriff_withdrawn: list[str] = []
+        self._sheriff_pk_candidates: list[str] = []
+        self._sheriff_speech_order: list[str] = []
+        self._sheriff_voters: list[str] = []
+        self._sheriff_vote_round = 0
+        self._sheriff_sealed_choices: dict[str, Action] = {}
+        self._sheriff_day_direction: Optional[str] = None
+        self._day_speech_order: list[str] = []
+        self._sheriff_nomination_target: Optional[str] = None
+        self._sheriff_election_complete = not config.enable_sheriff
+        self._badge_owner_awaiting_action: Optional[str] = None
+
+        self._pending_dawn_deaths: dict[str, str] = {}
+        self._day_vote_round = 0
+        self._day_pk_candidates: list[str] = []
+        # Destination after badge/hunter death abilities finish.  Keeping one
+        # continuation makes badge-before-gun ordering identical for every
+        # source of death, including a hunter shooting the new sheriff.
+        self._after_hunter_phase = None
+
         role_counts = Counter(role.value for role in deck)
         self._log(
             "game_started",
@@ -170,8 +198,19 @@ class WerewolfGame:
             Phase.NIGHT_WITCH_SAVE: self._step_witch_save,
             Phase.NIGHT_WITCH_POISON: self._step_witch_poison,
             Phase.NIGHT_RESOLVE: self._resolve_night,
+            Phase.SHERIFF_RUN: self._step_sheriff_run,
+            Phase.SHERIFF_SPEECH: self._step_sheriff_speech,
+            Phase.SHERIFF_WITHDRAW: self._step_sheriff_withdraw,
+            Phase.SHERIFF_VOTE: self._step_sheriff_vote,
+            Phase.SHERIFF_PK_SPEECH: self._step_sheriff_pk_speech,
+            Phase.SHERIFF_PK_VOTE: self._step_sheriff_vote,
+            Phase.DAWN_REVEAL: self._resolve_dawn,
+            Phase.SHERIFF_BADGE: self._step_sheriff_badge,
+            Phase.SHERIFF_ORDER: self._step_sheriff_order,
             Phase.DAY_DISCUSSION: self._step_discussion,
             Phase.DAY_VOTE: self._step_vote,
+            Phase.DAY_PK_SPEECH: self._step_day_pk_speech,
+            Phase.DAY_PK_VOTE: self._step_vote,
             Phase.HUNTER_SHOT: self._step_hunter,
         }
         handler = handlers.get(self.phase)
@@ -232,11 +271,14 @@ class WerewolfGame:
             if self.phase in (Phase.NIGHT_WITCH_SAVE, Phase.NIGHT_WITCH_POISON):
                 private_facts["night_victim"] = self._night_victim
 
+        self_state = player.to_private_dict()
+        self_state["is_sheriff"] = player.id == self._sheriff_holder
+        private_facts["sheriff"] = self._sheriff_public_state()
         return Observation(
             viewer_id=viewer_id,
             round=self.round,
             phase=self.phase,
-            self_state=player.to_private_dict(),
+            self_state=self_state,
             players=self._players_view(viewer_id=viewer_id, omniscient=False),
             events=self.event_log(viewer_id=viewer_id),
             legal_actions=[item.to_dict() for item in legal],
@@ -272,8 +314,19 @@ class WerewolfGame:
             raise KeyError(f"unknown player: {viewer_id}")
         stage: str = self.phase.public_name
         if omniscient or self.phase in (
+            Phase.SHERIFF_RUN,
+            Phase.SHERIFF_SPEECH,
+            Phase.SHERIFF_WITHDRAW,
+            Phase.SHERIFF_VOTE,
+            Phase.SHERIFF_PK_SPEECH,
+            Phase.SHERIFF_PK_VOTE,
+            Phase.DAWN_REVEAL,
+            Phase.SHERIFF_BADGE,
+            Phase.SHERIFF_ORDER,
             Phase.DAY_DISCUSSION,
             Phase.DAY_VOTE,
+            Phase.DAY_PK_SPEECH,
+            Phase.DAY_PK_VOTE,
             Phase.HUNTER_SHOT,
             Phase.FINISHED,
         ):
@@ -293,8 +346,18 @@ class WerewolfGame:
                 pending = self.pending_action.to_dict()
             elif not hidden_private_turn:
                 is_public_turn = self.phase in (
+                    Phase.SHERIFF_RUN,
+                    Phase.SHERIFF_SPEECH,
+                    Phase.SHERIFF_WITHDRAW,
+                    Phase.SHERIFF_VOTE,
+                    Phase.SHERIFF_PK_SPEECH,
+                    Phase.SHERIFF_PK_VOTE,
+                    Phase.SHERIFF_BADGE,
+                    Phase.SHERIFF_ORDER,
                     Phase.DAY_DISCUSSION,
                     Phase.DAY_VOTE,
+                    Phase.DAY_PK_SPEECH,
+                    Phase.DAY_PK_VOTE,
                     Phase.HUNTER_SHOT,
                 )
                 pending = {
@@ -318,6 +381,7 @@ class WerewolfGame:
             "winner": self.winner,
             "win_reason": self.win_reason,
             "players": self._players_view(viewer_id=viewer_id, omniscient=omniscient),
+            "sheriff": self._sheriff_public_state(),
             "pending_action": pending,
             "events": visible_events,
             "event_count": len(visible_events),
@@ -333,6 +397,7 @@ class WerewolfGame:
             "rounds": self.round,
             "seed": self.config.seed,
             "players": self._players_view(omniscient=True),
+            "sheriff": self._sheriff_public_state(),
             "event_count": len(self.events),
         }
 
@@ -425,9 +490,24 @@ class WerewolfGame:
             reasons.setdefault(target, reason)
             if reason == "witch_poison":
                 reasons[target] = reason
+        self._pending_dawn_deaths = reasons
+        if (
+            self.round == 1
+            and self.config.enable_sheriff
+            and not self._sheriff_election_complete
+        ):
+            self._enter_phase(Phase.SHERIFF_RUN)
+        else:
+            self._enter_phase(Phase.DAWN_REVEAL)
+
+    def _resolve_dawn(self) -> None:
+        reasons = dict(self._pending_dawn_deaths)
+        self._pending_dawn_deaths = {}
         killed: list[str] = []
         for player_id in self.players:
-            if player_id in reasons and self._kill_player(player_id, reasons[player_id], public_cause="night"):
+            if player_id in reasons and self._kill_player(
+                player_id, reasons[player_id], public_cause="night"
+            ):
                 killed.append(player_id)
 
         if killed:
@@ -438,7 +518,11 @@ class WerewolfGame:
                 data={"deaths": killed},
             )
         else:
-            self._log("night_result", "The night ended peacefully; nobody died.", data={"deaths": []})
+            self._log(
+                "night_result",
+                "The night ended peacefully; nobody died.",
+                data={"deaths": []},
+            )
 
         self._hunter_queue = [
             player_id
@@ -449,24 +533,157 @@ class WerewolfGame:
                 or self.config.hunter_can_shoot_if_poisoned
             )
         ]
+        self._after_hunter_phase = Phase.SHERIFF_ORDER
+        dead_sheriff = next(
+            (pid for pid in killed if pid == self._sheriff_holder), None
+        )
+        if dead_sheriff is not None:
+            self._begin_badge_transfer(dead_sheriff)
+            return
         if self._hunter_queue:
-            self._after_hunter_phase = Phase.DAY_DISCUSSION
             self._enter_phase(Phase.HUNTER_SHOT)
             return
-        if self._check_victory():
+        self._complete_death_sequence()
+
+    def _step_sheriff_run(self) -> None:
+        if not self._phase_queue:
+            self._resolve_sheriff_run()
             return
-        self._enter_phase(Phase.DAY_DISCUSSION)
+        actor = self._phase_queue[0]
+        legal = (
+            LegalAction(
+                ActionType.SHERIFF_RUN,
+                can_pass=True,
+                description="Run for sheriff, or remain off the ballot.",
+            ),
+        )
+        self._request_or_act(actor, legal, "Choose whether to run for sheriff.")
+
+    def _step_sheriff_speech(self) -> None:
+        if not self._phase_queue:
+            self._enter_phase(Phase.SHERIFF_WITHDRAW)
+            return
+        actor = self._phase_queue[0]
+        targets = tuple(pid for pid in self.players if pid != actor)
+        legal = (
+            LegalAction(
+                ActionType.SPEAK,
+                targets,
+                content_required=True,
+                description="Give a public sheriff campaign speech.",
+            ),
+        )
+        self._request_or_act(actor, legal, "Give your sheriff campaign speech.")
+
+    def _step_sheriff_withdraw(self) -> None:
+        if not self._phase_queue:
+            self._resolve_sheriff_withdrawals()
+            return
+        actor = self._phase_queue[0]
+        legal = (
+            LegalAction(
+                ActionType.SHERIFF_WITHDRAW,
+                can_pass=True,
+                description="Withdraw from the sheriff election, or stay in.",
+            ),
+        )
+        self._request_or_act(actor, legal, "Choose whether to withdraw.")
+
+    def _step_sheriff_vote(self) -> None:
+        if not self._phase_queue:
+            self._resolve_sheriff_vote()
+            return
+        actor = self._phase_queue[0]
+        targets = tuple(self._sheriff_pk_candidates or self._sheriff_candidates)
+        legal = (
+            LegalAction(
+                ActionType.SHERIFF_VOTE,
+                targets,
+                can_pass=True,
+                description="Vote for sheriff, or abstain.",
+            ),
+        )
+        self._request_or_act(actor, legal, "Cast your sheriff ballot or abstain.")
+
+    def _step_sheriff_pk_speech(self) -> None:
+        if not self._phase_queue:
+            self._enter_phase(Phase.SHERIFF_PK_VOTE)
+            return
+        actor = self._phase_queue[0]
+        targets = tuple(pid for pid in self.players if pid != actor)
+        legal = (
+            LegalAction(
+                ActionType.SPEAK,
+                targets,
+                content_required=True,
+                description="Give a sheriff runoff speech.",
+            ),
+        )
+        self._request_or_act(actor, legal, "Give your sheriff runoff speech.")
+
+    def _step_sheriff_badge(self) -> None:
+        if not self._phase_queue:
+            self._finish_badge_transfer()
+            return
+        actor = self._phase_queue[0]
+        targets = tuple(pid for pid in self._alive_ids() if pid != actor)
+        legal_actions: list[LegalAction] = []
+        if targets:
+            legal_actions.append(
+                LegalAction(
+                    ActionType.SHERIFF_TRANSFER,
+                    targets,
+                    description="Transfer the sheriff badge to a living player.",
+                )
+            )
+        legal_actions.append(
+            LegalAction(
+                ActionType.SHERIFF_DESTROY,
+                description="Destroy the sheriff badge permanently.",
+            )
+        )
+        self._request_or_act(actor, tuple(legal_actions), "Transfer or destroy the sheriff badge.")
+
+    def _step_sheriff_order(self) -> None:
+        if not self._phase_queue:
+            self._enter_phase(Phase.DAY_DISCUSSION)
+            return
+        actor = self._phase_queue[0]
+        legal = (
+            LegalAction(
+                ActionType.SHERIFF_ORDER_CLOCKWISE,
+                description="Use clockwise speaking order.",
+            ),
+            LegalAction(
+                ActionType.SHERIFF_ORDER_COUNTERCLOCKWISE,
+                description="Use counterclockwise speaking order.",
+            ),
+        )
+        self._request_or_act(actor, legal, "Choose today's speaking direction.")
 
     def _step_discussion(self) -> None:
         if not self._phase_queue:
             if self._discussion_cycle < self.config.discussion_rounds:
                 self._discussion_cycle += 1
-                self._phase_queue = self._alive_ids()
+                self._phase_queue = [
+                    pid for pid in self._day_speech_order if self.players[pid].alive
+                ]
                 return
             self._enter_phase(Phase.DAY_VOTE)
             return
         actor = self._phase_queue[0]
         targets = tuple(pid for pid in self._alive_ids() if pid != actor)
+        if actor == self._sheriff_holder:
+            legal = (
+                LegalAction(
+                    ActionType.SHERIFF_SUMMARIZE,
+                    targets,
+                    content_required=True,
+                    description="Summarize the discussion and nominate an elimination target.",
+                ),
+            )
+            self._request_or_act(actor, legal, "Summarize and nominate today's target.")
+            return
         legal = (
             LegalAction(
                 ActionType.SPEAK,
@@ -482,12 +699,31 @@ class WerewolfGame:
             self._resolve_day_vote()
             return
         actor = self._phase_queue[0]
-        targets = tuple(pid for pid in self._alive_ids() if pid != actor)
+        if self.phase is Phase.DAY_PK_VOTE:
+            targets = tuple(self._day_pk_candidates)
+        else:
+            targets = tuple(pid for pid in self._alive_ids() if pid != actor)
         if not targets:
             self._phase_queue.pop(0)
             return
         legal = (LegalAction(ActionType.VOTE, targets, description="Vote to eliminate one player."),)
         self._request_or_act(actor, legal, "Cast your elimination vote.")
+
+    def _step_day_pk_speech(self) -> None:
+        if not self._phase_queue:
+            self._enter_phase(Phase.DAY_PK_VOTE)
+            return
+        actor = self._phase_queue[0]
+        targets = tuple(pid for pid in self._alive_ids() if pid != actor)
+        legal = (
+            LegalAction(
+                ActionType.SPEAK,
+                targets,
+                content_required=True,
+                description="Give a public elimination runoff speech.",
+            ),
+        )
+        self._request_or_act(actor, legal, "Give your elimination runoff speech.")
 
     def _step_hunter(self) -> None:
         if not self._phase_queue:
@@ -594,7 +830,12 @@ class WerewolfGame:
             if rule.target_ids
             else None
         )
-        return Action(actor_id, rule.action_type, target_id=target)
+        content = (
+            "I am summarizing the public evidence and nominating this target."
+            if rule.content_required
+            else None
+        )
+        return Action(actor_id, rule.action_type, target_id=target, content=content)
 
     def _consume_action(self, action: Action) -> None:
         if not self._phase_queue or self._phase_queue[0] != action.actor_id:
@@ -684,20 +925,142 @@ class WerewolfGame:
                 self._enter_phase(Phase.NIGHT_RESOLVE)
             return
 
+        if self.phase in (Phase.SHERIFF_RUN, Phase.SHERIFF_WITHDRAW):
+            if self.phase is Phase.SHERIFF_RUN:
+                self._log(
+                    "sheriff_run_choice",
+                    "A sheriff candidacy choice was sealed.",
+                    actor_id=action.actor_id,
+                    data={"running": action.action_type is ActionType.SHERIFF_RUN},
+                    visibility=("observer",),
+                )
+            else:
+                self._log(
+                    "sheriff_withdraw_choice",
+                    "A sheriff withdrawal choice was sealed.",
+                    actor_id=action.actor_id,
+                    data={"withdrew": action.action_type is ActionType.SHERIFF_WITHDRAW},
+                    visibility=("observer",),
+                )
+            self._sheriff_sealed_choices[action.actor_id] = action
+            if not self._phase_queue:
+                if self.phase is Phase.SHERIFF_RUN:
+                    self._resolve_sheriff_run()
+                else:
+                    self._resolve_sheriff_withdrawals()
+            return
+
+        if self.phase in (Phase.SHERIFF_VOTE, Phase.SHERIFF_PK_VOTE):
+            self._log(
+                "sheriff_vote_cast",
+                "A sheriff ballot was sealed.",
+                actor_id=action.actor_id,
+                target_id=action.target_id,
+                data={
+                    "round": self._sheriff_vote_round,
+                    "abstained": action.action_type is ActionType.PASS,
+                },
+                visibility=("observer",),
+            )
+            self._sheriff_sealed_choices[action.actor_id] = action
+            if not self._phase_queue:
+                self._resolve_sheriff_vote()
+            return
+
+        if self.phase in (Phase.SHERIFF_SPEECH, Phase.SHERIFF_PK_SPEECH):
+            metadata = self._sanitize_speech_metadata(action.metadata)
+            content = (action.content or "").strip()[:800]
+            event_type = (
+                "sheriff_pk_speech"
+                if self.phase is Phase.SHERIFF_PK_SPEECH
+                else "sheriff_speech"
+            )
+            self._log(event_type, content, actor_id=action.actor_id, data=metadata)
+            if not self._phase_queue:
+                next_phase = (
+                    Phase.SHERIFF_PK_VOTE
+                    if self.phase is Phase.SHERIFF_PK_SPEECH
+                    else Phase.SHERIFF_WITHDRAW
+                )
+                self._enter_phase(next_phase)
+            return
+
+        if self.phase is Phase.SHERIFF_BADGE:
+            previous = self._badge_owner_awaiting_action or action.actor_id
+            if action.action_type is ActionType.SHERIFF_TRANSFER:
+                assert action.target_id is not None
+                self._sheriff_holder = action.target_id
+                self._sheriff_badge_status = "holder"
+                self._log(
+                    "badge_transferred",
+                    f"{self.players[previous].name} transferred the sheriff badge to "
+                    f"{self.players[action.target_id].name}.",
+                    actor_id=previous,
+                    target_id=action.target_id,
+                )
+            else:
+                self._sheriff_holder = None
+                self._sheriff_badge_status = "destroyed"
+                self._log(
+                    "badge_destroyed",
+                    f"{self.players[previous].name} destroyed the sheriff badge.",
+                    actor_id=previous,
+                )
+            self._badge_owner_awaiting_action = None
+            self._finish_badge_transfer()
+            return
+
+        if self.phase is Phase.SHERIFF_ORDER:
+            direction = (
+                "clockwise"
+                if action.action_type is ActionType.SHERIFF_ORDER_CLOCKWISE
+                else "counterclockwise"
+            )
+            self._sheriff_day_direction = direction
+            self._day_speech_order = self._speaking_order(action.actor_id, direction)
+            self._log(
+                "sheriff_order",
+                f"{self.players[action.actor_id].name} chose {direction} speaking order.",
+                actor_id=action.actor_id,
+                data={"direction": direction, "order": list(self._day_speech_order)},
+            )
+            self._enter_phase(Phase.DAY_DISCUSSION)
+            return
+
         if self.phase is Phase.DAY_DISCUSSION:
             metadata = self._sanitize_speech_metadata(action.metadata)
             content = (action.content or "").strip()[:800]
-            self._log(
-                "speech",
-                content,
-                actor_id=action.actor_id,
-                data=metadata,
-            )
+            if action.action_type is ActionType.SHERIFF_SUMMARIZE:
+                assert action.target_id is not None
+                self._sheriff_nomination_target = action.target_id
+                metadata["sheriff_nomination"] = action.target_id
+                self._log(
+                    "sheriff_summary",
+                    content,
+                    actor_id=action.actor_id,
+                    target_id=action.target_id,
+                    data=metadata,
+                )
+            else:
+                self._log("speech", content, actor_id=action.actor_id, data=metadata)
             if not self._phase_queue and self._discussion_cycle >= self.config.discussion_rounds:
                 self._enter_phase(Phase.DAY_VOTE)
             return
 
-        if self.phase is Phase.DAY_VOTE:
+        if self.phase is Phase.DAY_PK_SPEECH:
+            metadata = self._sanitize_speech_metadata(action.metadata)
+            content = (action.content or "").strip()[:800]
+            self._log(
+                "day_pk_speech",
+                content,
+                actor_id=action.actor_id,
+                data=metadata,
+            )
+            if not self._phase_queue:
+                self._enter_phase(Phase.DAY_PK_VOTE)
+            return
+
+        if self.phase in (Phase.DAY_VOTE, Phase.DAY_PK_VOTE):
             assert action.target_id is not None
             self._day_votes[action.actor_id] = action.target_id
             self._log(
@@ -726,6 +1089,10 @@ class WerewolfGame:
                     target = self.players[action.target_id]
                     if target.role is Role.HUNTER and action.target_id not in self._phase_queue:
                         self._phase_queue.append(action.target_id)
+                    if action.target_id == self._sheriff_holder:
+                        self._hunter_queue = list(self._phase_queue)
+                        self._begin_badge_transfer(action.target_id)
+                        return
             else:
                 self._log(
                     "hunter_passed",
@@ -757,39 +1124,248 @@ class WerewolfGame:
             )
         self._enter_phase(Phase.NIGHT_SEER)
 
+    def _resolve_sheriff_run(self) -> None:
+        candidates = [
+            pid
+            for pid in self.players
+            if (choice := self._sheriff_sealed_choices.get(pid)) is not None
+            and choice.action_type is ActionType.SHERIFF_RUN
+        ]
+        self._sheriff_sealed_choices = {}
+        self._sheriff_original_candidates = list(candidates)
+        self._sheriff_candidates = list(candidates)
+        self._sheriff_pk_candidates = []
+        self._sheriff_voters = [pid for pid in self.players if pid not in candidates]
+        if candidates:
+            start = self.rng.randrange(len(candidates))
+            self._sheriff_speech_order = candidates[start:] + candidates[:start]
+        else:
+            self._sheriff_speech_order = []
+        self._log(
+            "sheriff_candidacy_result",
+            "Sheriff candidates were announced.",
+            data={
+                "candidates": list(candidates),
+                "speech_order": list(self._sheriff_speech_order),
+            },
+        )
+        if not candidates:
+            self._void_sheriff_election("no_candidates", "Nobody ran for sheriff.")
+            return
+        self._enter_phase(Phase.SHERIFF_SPEECH)
+
+    def _resolve_sheriff_withdrawals(self) -> None:
+        withdrawn = [
+            pid
+            for pid in self._sheriff_original_candidates
+            if (choice := self._sheriff_sealed_choices.get(pid)) is not None
+            and choice.action_type is ActionType.SHERIFF_WITHDRAW
+        ]
+        self._sheriff_sealed_choices = {}
+        self._sheriff_withdrawn = withdrawn
+        self._sheriff_candidates = [
+            pid for pid in self._sheriff_original_candidates if pid not in withdrawn
+        ]
+        self._log(
+            "sheriff_withdrawal_result",
+            "Sheriff withdrawals were announced.",
+            data={
+                "withdrawn": list(withdrawn),
+                "candidates": list(self._sheriff_candidates),
+            },
+        )
+        if not self._sheriff_candidates:
+            self._void_sheriff_election("all_withdrew", "All candidates withdrew.")
+        elif len(self._sheriff_candidates) == 1:
+            self._elect_sheriff(self._sheriff_candidates[0], automatic=True)
+        else:
+            self._sheriff_vote_round = 1
+            self._enter_phase(Phase.SHERIFF_VOTE)
+
+    def _resolve_sheriff_vote(self) -> None:
+        candidates = list(self._sheriff_pk_candidates or self._sheriff_candidates)
+        ballots = {
+            pid: (
+                choice.target_id
+                if choice.action_type is ActionType.SHERIFF_VOTE
+                and choice.target_id in candidates
+                else None
+            )
+            for pid, choice in self._sheriff_sealed_choices.items()
+        }
+        votes = {
+            pid: target_id
+            for pid, target_id in ballots.items()
+            if target_id is not None
+        }
+        self._sheriff_sealed_choices = {}
+        tally = Counter(target for target in votes.values() if target is not None)
+        highest = max(tally.values()) if tally else 0
+        tied = [pid for pid in candidates if tally.get(pid, 0) == highest] if highest else []
+        data: dict[str, Any] = {
+            "round": self._sheriff_vote_round,
+            "tally": dict(tally),
+            "tied": tied,
+        }
+        if self.config.reveal_vote_choices:
+            # Preserve explicit abstentions so the revealed batch is a complete
+            # ballot record rather than only a list of valid votes.
+            data["votes"] = ballots
+        self._log(
+            "sheriff_vote_result",
+            "Sheriff ballots were counted.",
+            data=data,
+        )
+        if not tally:
+            self._void_sheriff_election(
+                "no_valid_ballots", "No valid sheriff ballots were cast."
+            )
+            return
+        if len(tied) == 1:
+            self._elect_sheriff(tied[0])
+            return
+        if self._sheriff_vote_round >= 2:
+            self._void_sheriff_election(
+                "runoff_tied", "The sheriff runoff remained tied."
+            )
+            return
+        self._sheriff_vote_round = 2
+        speech_positions = {pid: index for index, pid in enumerate(self._sheriff_speech_order)}
+        self._sheriff_pk_candidates = sorted(
+            tied,
+            key=lambda pid: speech_positions.get(pid, -1),
+            reverse=True,
+        )
+        self._log(
+            "sheriff_pk_started",
+            "A sheriff runoff began.",
+            data={"candidates": list(self._sheriff_pk_candidates)},
+        )
+        self._enter_phase(Phase.SHERIFF_PK_SPEECH)
+
+    def _elect_sheriff(self, player_id: str, *, automatic: bool = False) -> None:
+        self._sheriff_holder = player_id
+        self._sheriff_badge_status = "holder"
+        self._sheriff_election_complete = True
+        self._sheriff_pk_candidates = []
+        self._log(
+            "sheriff_elected",
+            f"{self.players[player_id].name} became sheriff.",
+            actor_id=player_id,
+            data={"holder_id": player_id, "automatic": automatic},
+        )
+        self._enter_phase(Phase.DAWN_REVEAL)
+
+    def _void_sheriff_election(self, reason: str, message: str) -> None:
+        self._sheriff_holder = None
+        self._sheriff_badge_status = "void"
+        self._sheriff_election_complete = True
+        self._sheriff_pk_candidates = []
+        self._log(
+            "sheriff_election_void",
+            message,
+            data={"reason": message, "reason_code": reason},
+        )
+        self._enter_phase(Phase.DAWN_REVEAL)
+
     def _resolve_day_vote(self) -> None:
-        tally = Counter(self._day_votes.values())
+        tally_units: Counter[str] = Counter()
+        unweighted_tally_units: Counter[str] = Counter()
+        for voter_id, target_id in self._day_votes.items():
+            weight = 3 if voter_id == self._sheriff_holder else 2
+            tally_units[target_id] += weight
+            unweighted_tally_units[target_id] += 2
         eliminated: Optional[str] = None
         tied: list[str] = []
-        if tally:
-            highest = max(tally.values())
-            tied = sorted(target for target, count in tally.items() if count == highest)
+        if tally_units:
+            highest = max(tally_units.values())
+            tied = sorted(target for target, count in tally_units.items() if count == highest)
             if len(tied) == 1:
                 eliminated = tied[0]
-            elif self.config.vote_tie_policy == "random":
+            elif not self.config.enable_sheriff and self.config.vote_tie_policy == "random":
                 eliminated = self.rng.choice(tied)
 
-        vote_data: dict[str, Any] = {"tally": dict(tally), "tied": tied, "eliminated": eliminated}
+        unweighted_winners: list[str] = []
+        if unweighted_tally_units:
+            unweighted_highest = max(unweighted_tally_units.values())
+            unweighted_winners = sorted(
+                pid
+                for pid, units in unweighted_tally_units.items()
+                if units == unweighted_highest
+            )
+        weighted_unique = tied[0] if len(tied) == 1 else None
+        unweighted_unique = (
+            unweighted_winners[0] if len(unweighted_winners) == 1 else None
+        )
+        sheriff_vote_decisive = bool(
+            self._sheriff_holder
+            and self._sheriff_holder in self._day_votes
+            and weighted_unique is not None
+            and weighted_unique != unweighted_unique
+        )
+        vote_data: dict[str, Any] = {
+            "round": self._day_vote_round,
+            "tally_units": dict(tally_units),
+            "unweighted_tally_units": dict(unweighted_tally_units),
+            "tally": {pid: units / 2 for pid, units in tally_units.items()},
+            "tied": tied,
+            "eliminated": eliminated,
+            "sheriff_id": self._sheriff_holder,
+            "sheriff_vote_decisive": sheriff_vote_decisive,
+        }
         if self.config.reveal_vote_choices:
             vote_data["votes"] = dict(self._day_votes)
+            vote_data["vote_weights"] = {
+                pid: 1.5 if pid == self._sheriff_holder else 1.0
+                for pid in self._day_votes
+            }
         if eliminated is None:
-            self._log("vote_result", "The vote was tied; nobody was eliminated.", data=vote_data)
+            self._log(
+                "day_vote_result",
+                "The elimination vote did not produce a sole leader.",
+                data=vote_data,
+            )
+            if (
+                self.config.enable_sheriff
+                and self._day_vote_round == 1
+                and len(tied) > 1
+            ):
+                positions = {pid: idx for idx, pid in enumerate(self._day_speech_order)}
+                self._day_pk_candidates = sorted(
+                    tied,
+                    key=lambda pid: positions.get(pid, -1),
+                    reverse=True,
+                )
+                self._log(
+                    "day_pk_started",
+                    "An elimination runoff began.",
+                    data={"candidates": list(self._day_pk_candidates)},
+                )
+                self._enter_phase(Phase.DAY_PK_SPEECH)
+                return
             self._advance_after_day()
             return
 
         self._log(
-            "vote_result",
+            "day_vote_result",
             f"{self.players[eliminated].name} was selected for elimination.",
             target_id=eliminated,
             data=vote_data,
         )
         killed = self._kill_player(eliminated, "execution", public_cause="execution")
-        if killed and self.players[eliminated].role is Role.HUNTER:
-            self._hunter_queue = [eliminated]
-            self._after_hunter_phase = Phase.NIGHT_WOLF
-            self._enter_phase(Phase.HUNTER_SHOT)
+        if not killed:
+            self._advance_after_day()
             return
-        self._advance_after_day()
+        self._hunter_queue = (
+            [eliminated] if self.players[eliminated].role is Role.HUNTER else []
+        )
+        self._after_hunter_phase = Phase.NIGHT_WOLF
+        if eliminated == self._sheriff_holder:
+            self._begin_badge_transfer(eliminated)
+        elif self._hunter_queue:
+            self._enter_phase(Phase.HUNTER_SHOT)
+        else:
+            self._complete_death_sequence()
 
     def _advance_after_day(self) -> None:
         if self._check_victory():
@@ -801,7 +1377,10 @@ class WerewolfGame:
         self._enter_phase(Phase.NIGHT_WOLF)
 
     def _finish_hunter_phase(self) -> None:
-        destination = self._after_hunter_phase
+        self._complete_death_sequence()
+
+    def _complete_death_sequence(self) -> None:
+        destination = self._after_hunter_phase or Phase.SHERIFF_ORDER
         self._after_hunter_phase = None
         if self._check_victory():
             return
@@ -812,7 +1391,51 @@ class WerewolfGame:
             self.round += 1
             self._enter_phase(Phase.NIGHT_WOLF)
         else:
-            self._enter_phase(destination or Phase.DAY_DISCUSSION)
+            if destination is Phase.SHERIFF_ORDER:
+                self._start_day()
+            else:
+                self._enter_phase(destination)
+
+    def _begin_badge_transfer(self, dead_holder: str) -> None:
+        self._badge_owner_awaiting_action = dead_holder
+        self._log(
+            "badge_transfer_required",
+            f"{self.players[dead_holder].name} must transfer or destroy the sheriff badge.",
+            actor_id=dead_holder,
+        )
+        self._enter_phase(Phase.SHERIFF_BADGE)
+
+    def _finish_badge_transfer(self) -> None:
+        if self._hunter_queue:
+            self._enter_phase(Phase.HUNTER_SHOT)
+        else:
+            self._complete_death_sequence()
+
+    def _start_day(self) -> None:
+        # Direction and speaking order are daily decisions.  Clear yesterday's
+        # public values before the sheriff is prompted so spectators and later
+        # agents cannot mistake stale order data for today's choice.
+        self._sheriff_day_direction = None
+        self._day_speech_order = []
+        if (
+            self.config.enable_sheriff
+            and self._sheriff_badge_status == "holder"
+            and self._sheriff_holder is not None
+            and self.players[self._sheriff_holder].alive
+        ):
+            self._enter_phase(Phase.SHERIFF_ORDER)
+        else:
+            self._day_speech_order = self._alive_ids()
+            self._enter_phase(Phase.DAY_DISCUSSION)
+
+    def _speaking_order(self, sheriff_id: str, direction: str) -> list[str]:
+        seats = list(self.players)
+        anchor = seats.index(sheriff_id)
+        if direction == "clockwise":
+            traversal = seats[anchor + 1 :] + seats[:anchor]
+        else:
+            traversal = list(reversed(seats[:anchor])) + list(reversed(seats[anchor + 1 :]))
+        return [pid for pid in traversal if self.players[pid].alive] + [sheriff_id]
 
     def _enter_phase(self, phase: Phase) -> None:
         if self.status is GameStatus.FINISHED:
@@ -828,6 +1451,8 @@ class WerewolfGame:
             self._night_saved = False
             self._night_poison_targets = []
             self._witch_used_this_night = set()
+            self._day_pk_candidates = []
+            self._sheriff_nomination_target = None
             self._phase_queue = self._alive_role_ids(Role.WEREWOLF)
             self._log("night_started", f"Night {self.round} began.")
         elif phase is Phase.NIGHT_SEER:
@@ -854,14 +1479,79 @@ class WerewolfGame:
         elif phase is Phase.NIGHT_RESOLVE:
             self._phase_queue = []
             self._log_secret_phase(phase)
+        elif phase is Phase.SHERIFF_RUN:
+            self._sheriff_sealed_choices = {}
+            self._phase_queue = self._alive_ids()
+            self._log(
+                "sheriff_election_started",
+                "The first-day sheriff election began before dawn was announced.",
+            )
+        elif phase is Phase.SHERIFF_SPEECH:
+            self._phase_queue = list(self._sheriff_speech_order)
+        elif phase is Phase.SHERIFF_WITHDRAW:
+            self._sheriff_sealed_choices = {}
+            self._phase_queue = list(self._sheriff_original_candidates)
+        elif phase in (Phase.SHERIFF_VOTE, Phase.SHERIFF_PK_VOTE):
+            self._sheriff_sealed_choices = {}
+            self._phase_queue = [
+                pid for pid in self._sheriff_voters if self.players[pid].alive
+            ]
+            self._log(
+                "sheriff_vote_started",
+                "Sheriff voting began.",
+                data={
+                    "round": self._sheriff_vote_round,
+                    "candidates": list(
+                        self._sheriff_pk_candidates or self._sheriff_candidates
+                    ),
+                    "voters": list(self._phase_queue),
+                },
+            )
+        elif phase is Phase.SHERIFF_PK_SPEECH:
+            self._phase_queue = list(self._sheriff_pk_candidates)
+        elif phase is Phase.DAWN_REVEAL:
+            self._phase_queue = []
+            self._log("dawn_reveal_started", f"Dawn {self.round} results will be announced.")
+        elif phase is Phase.SHERIFF_BADGE:
+            self._phase_queue = (
+                [self._badge_owner_awaiting_action]
+                if self._badge_owner_awaiting_action is not None
+                else []
+            )
+        elif phase is Phase.SHERIFF_ORDER:
+            holder = self._sheriff_holder
+            self._phase_queue = (
+                [holder]
+                if holder is not None and self.players[holder].alive
+                else []
+            )
         elif phase is Phase.DAY_DISCUSSION:
             self._discussion_cycle = 1
-            self._phase_queue = self._alive_ids()
+            if not self._day_speech_order:
+                self._day_speech_order = self._alive_ids()
+            self._phase_queue = [
+                pid for pid in self._day_speech_order if self.players[pid].alive
+            ]
             self._log("day_started", f"Day {self.round} discussion began.")
         elif phase is Phase.DAY_VOTE:
             self._day_votes = {}
+            self._day_vote_round = 1
+            self._day_pk_candidates = []
             self._phase_queue = self._alive_ids()
             self._log("vote_started", f"Day {self.round} voting began.")
+        elif phase is Phase.DAY_PK_SPEECH:
+            self._phase_queue = list(self._day_pk_candidates)
+        elif phase is Phase.DAY_PK_VOTE:
+            self._day_votes = {}
+            self._day_vote_round = 2
+            self._phase_queue = [
+                pid for pid in self._alive_ids() if pid not in self._day_pk_candidates
+            ]
+            self._log(
+                "vote_started",
+                f"Day {self.round} runoff voting began.",
+                data={"round": 2, "candidates": list(self._day_pk_candidates)},
+            )
         elif phase is Phase.HUNTER_SHOT:
             self._phase_queue = list(self._hunter_queue)
             self._hunter_queue = []
@@ -963,6 +1653,7 @@ class WerewolfGame:
                 "role": player.role.value if role_visible else None,
                 "team": player.team.value if role_visible else None,
                 "death_round": player.death_round if not player.alive else None,
+                "is_sheriff": player.id == self._sheriff_holder,
             }
             if omniscient:
                 item["death_reason"] = player.death_reason
@@ -1003,16 +1694,56 @@ class WerewolfGame:
 
     def _sanitize_speech_metadata(self, metadata: Mapping[str, Any]) -> dict[str, Any]:
         allowed: dict[str, Any] = {}
-        for key in (
-            "claim_role",
-            "accuse_target",
-            "defend_target",
-            "vote_intent",
-        ):
+        claim_role = metadata.get("claim_role")
+        if claim_role is not None:
+            allowed["claim_role"] = str(claim_role)[:80]
+        # These fields are machine-readable player references.  Invalid ids
+        # are dropped rather than being allowed to create phantom seats in the
+        # UI, replay, or evaluation pipeline.
+        for key in ("accuse_target", "defend_target", "vote_intent"):
             value = metadata.get(key)
-            if value is not None:
-                allowed[key] = str(value)[:80]
+            if value is not None and str(value) in self.players:
+                allowed[key] = str(value)
+        nomination = metadata.get("sheriff_nomination")
+        if nomination is not None and str(nomination) in self.players:
+            allowed["sheriff_nomination"] = str(nomination)
+        badge_flow = metadata.get("badge_flow")
+        if isinstance(badge_flow, Mapping):
+            mode = str(badge_flow.get("mode", ""))
+            raw_targets = badge_flow.get("targets", ())
+            if isinstance(raw_targets, Sequence) and not isinstance(raw_targets, (str, bytes)):
+                expected = 1 if mode == "single" else 2 if mode == "double" else 0
+                targets = [str(pid) for pid in raw_targets]
+                if (
+                    expected
+                    and len(targets) == expected
+                    and len(set(targets)) == len(targets)
+                    and all(pid in self.players for pid in targets)
+                ):
+                    sanitized_flow: dict[str, Any] = {"mode": mode, "targets": targets}
+                    fallback = badge_flow.get("fallback_target")
+                    if fallback is not None and str(fallback) in self.players:
+                        sanitized_flow["fallback_target"] = str(fallback)
+                    allowed["badge_flow"] = sanitized_flow
         return allowed
+
+    def _sheriff_public_state(self) -> dict[str, Any]:
+        return {
+            "enabled": self.config.enable_sheriff,
+            "badge_status": self._sheriff_badge_status,
+            "holder_id": self._sheriff_holder,
+            "candidates": list(self._sheriff_candidates),
+            "withdrawn": list(self._sheriff_withdrawn),
+            # This object describes the sheriff election.  Daytime exile-PK
+            # candidates are published by ``day_pk_started`` and must not
+            # overwrite or resurrect an already-finished election runoff.
+            "pk_candidates": list(self._sheriff_pk_candidates),
+            "vote_round": self._sheriff_vote_round,
+            "speech_order": list(self._sheriff_speech_order),
+            "day_direction": self._sheriff_day_direction,
+            "day_speech_order": list(self._day_speech_order),
+            "nomination_target": self._sheriff_nomination_target,
+        }
 
     def _log_secret_phase(self, phase: Phase) -> None:
         self._log(

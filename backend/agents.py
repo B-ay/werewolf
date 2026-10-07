@@ -23,7 +23,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional, Protocol, Sequence, runtime_checkable
 
-from .models import Action, ActionType, Observation, Role
+from .models import Action, ActionType, Observation, Phase, Role
 
 
 @runtime_checkable
@@ -53,21 +53,147 @@ def _legal(observation: Observation) -> dict[str, Any]:
     return observation.legal_actions[0]
 
 
+def _legal_rules(observation: Observation) -> dict[ActionType, dict[str, Any]]:
+    """Index all legal rules, including multi-choice sheriff decisions."""
+
+    rules: dict[ActionType, dict[str, Any]] = {}
+    for rule in observation.legal_actions:
+        try:
+            kind = ActionType.coerce(rule.get("action_type"))
+        except (TypeError, ValueError):
+            continue
+        rules[kind] = rule
+    return rules
+
+
+def _seat_key(player_id: str) -> tuple[int, int | str]:
+    """Sort conventional ``p12`` seats numerically and other ids stably."""
+
+    match = re.fullmatch(r"p(\d+)", str(player_id), flags=re.IGNORECASE)
+    if match:
+        return (0, int(match.group(1)))
+    return (1, str(player_id))
+
+
+def _visible_player_ids(
+    observation: Observation, *, alive_only: bool = False
+) -> list[str]:
+    return [
+        str(player["id"])
+        for player in observation.players
+        if player.get("id") is not None
+        and (not alive_only or bool(player.get("alive")))
+    ]
+
+
+def _public_metadata_is_valid(action: Action, observation: Observation) -> bool:
+    """Validate structured public claims without consulting hidden state.
+
+    A badge-flow declaration communicates only future player references. It
+    must never carry inspection results (real or fabricated) as hidden fields;
+    actual claims belong in public speech content and established public claim
+    metadata.
+    """
+
+    metadata = action.metadata
+    if not isinstance(metadata, Mapping):
+        return False
+    player_ids = set(_visible_player_ids(observation))
+
+    flow = metadata.get("badge_flow")
+    if flow is not None:
+        if not isinstance(flow, Mapping):
+            return False
+        if set(flow) != {"mode", "targets", "fallback_target"}:
+            return False
+        mode = flow.get("mode")
+        if mode not in {"single", "double"}:
+            return False
+        targets = flow.get("targets")
+        if not isinstance(targets, list):
+            return False
+        expected_count = 1 if mode == "single" else 2
+        if len(targets) != expected_count:
+            return False
+        normalized_targets = [str(item) for item in targets]
+        if len(set(normalized_targets)) != len(normalized_targets):
+            return False
+        if any(target not in player_ids for target in normalized_targets):
+            return False
+        if observation.viewer_id in normalized_targets:
+            return False
+        fallback = flow.get("fallback_target")
+        if fallback is not None:
+            fallback = str(fallback)
+            if (
+                fallback not in player_ids
+                or fallback == observation.viewer_id
+                or fallback in normalized_targets
+            ):
+                return False
+
+    nomination = metadata.get("sheriff_nomination")
+    if nomination is not None:
+        nomination = str(nomination)
+        if nomination not in player_ids or nomination == observation.viewer_id:
+            return False
+        if (
+            action.action_type is ActionType.SHERIFF_SUMMARIZE
+            and action.target_id != nomination
+        ):
+            return False
+
+    # These pre-existing speech fields also carry player references.  Keep
+    # validation at the agent boundary so a provider can never smuggle an
+    # unknown seat into the public event stream.
+    for key in ("accuse_target", "defend_target", "vote_intent"):
+        referenced = metadata.get(key)
+        if referenced is not None and str(referenced) not in player_ids:
+            return False
+    claimed_role = metadata.get("claim_role")
+    if claimed_role is not None and str(claimed_role) not in {
+        role.value for role in Role
+    }:
+        return False
+    return True
+
+
 def _suspicion_from_events(
     events: Sequence[Mapping[str, Any]],
 ) -> dict[str, float]:
     """Build an explainable suspicion model from visible public statements."""
 
     scores: dict[str, float] = {}
+    public_speech_types = {
+        "speech",
+        "sheriff_speech",
+        "sheriff_pk_speech",
+        "sheriff_summary",
+        "day_pk_speech",
+    }
     for event in events:
-        if event.get("event_type") != "speech":
+        if event.get("event_type") not in public_speech_types:
             continue
         data = event.get("data") or {}
-        target = data.get("accuse_target")
-        if not target:
+        if not isinstance(data, Mapping):
             continue
-        weight = 3.0 if data.get("claim_role") == Role.SEER.value else 1.0
-        scores[str(target)] = scores.get(str(target), 0.0) + weight
+        claimed_seer = data.get("claim_role") == Role.SEER.value
+        target = data.get("accuse_target")
+        if target:
+            weight = 3.0 if claimed_seer else 1.0
+            scores[str(target)] = scores.get(str(target), 0.0) + weight
+
+        defended = data.get("defend_target")
+        if defended:
+            weight = 2.0 if claimed_seer else 0.75
+            scores[str(defended)] = scores.get(str(defended), 0.0) - weight
+
+        # A Sheriff summary is the formal consolidation recommendation.  It
+        # should influence baseline voters, while role-private evidence can
+        # still override it through each planner's score adjustments.
+        nomination = data.get("sheriff_nomination")
+        if nomination:
+            scores[str(nomination)] = scores.get(str(nomination), 0.0) + 4.0
     return scores
 
 
@@ -103,6 +229,8 @@ def _action_is_legal(action: Action, observation: Observation) -> bool:
     """Validate a provider action before it can cross the agent boundary."""
 
     if action.actor_id != observation.viewer_id:
+        return False
+    if not _public_metadata_is_valid(action, observation):
         return False
     if action.action_type is ActionType.PASS:
         return action.target_id is None and any(
@@ -176,6 +304,7 @@ class RoleMemory:
     self_state: dict[str, Any] = field(default_factory=dict)
     visible_players: list[dict[str, Any]] = field(default_factory=list)
     private_facts: dict[str, Any] = field(default_factory=dict)
+    strategy_state: dict[str, Any] = field(default_factory=dict)
     events: list[dict[str, Any]] = field(default_factory=list)
     decisions: list[dict[str, Any]] = field(default_factory=list)
     reflections: list[str] = field(default_factory=list)
@@ -229,6 +358,12 @@ class RoleMemory:
         self.self_state = deepcopy(observation.self_state)
         self.visible_players = deepcopy(observation.players)
         self.private_facts = deepcopy(observation.private_facts)
+        sheriff_public = observation.private_facts.get("sheriff")
+        if isinstance(sheriff_public, Mapping):
+            # The engine exposes this exact object to every viewpoint.  Store
+            # only that public overlay in strategy_state; role-private facts
+            # such as checks, potions, and wolf teammates remain elsewhere.
+            self.strategy_state["sheriff_public"] = deepcopy(dict(sheriff_public))
 
         for event in observation.events:
             seq = event.get("seq")
@@ -285,6 +420,7 @@ class RoleMemory:
                     "events": deepcopy(self.events),
                     "decisions": deepcopy(self.decisions),
                     "reflections": list(self.reflections),
+                    "strategy_state": deepcopy(self.strategy_state),
                 }
             )
             self.episodes = self.episodes[-self.max_episodes :]
@@ -304,6 +440,7 @@ class RoleMemory:
         self.self_state = {}
         self.visible_players = []
         self.private_facts = {}
+        self.strategy_state = {}
         self.events = []
         self.decisions = []
         self.reflections = []
@@ -334,6 +471,7 @@ class RoleMemory:
             "visible_events": deepcopy(self.events),
             "own_previous_decisions": deepcopy(self.decisions),
             "reflections": list(self.reflections),
+            "strategy_state": deepcopy(self.strategy_state),
         }
 
     def export(self) -> dict[str, Any]:
@@ -353,6 +491,7 @@ class RoleMemory:
             "self_state": deepcopy(self.self_state),
             "visible_players": deepcopy(self.visible_players),
             "private_facts": deepcopy(self.private_facts),
+            "strategy_state": deepcopy(self.strategy_state),
             "events": deepcopy(self.events),
             "decisions": deepcopy(self.decisions),
             "reflections": list(self.reflections),
@@ -401,6 +540,9 @@ class RoleMemory:
         self.self_state = deepcopy(dict(snapshot.get("self_state") or {}))
         self.visible_players = deepcopy(list(snapshot.get("visible_players") or []))
         self.private_facts = deepcopy(dict(snapshot.get("private_facts") or {}))
+        # Optional in schema v1 so snapshots created before sheriff support
+        # continue to restore without a migration.
+        self.strategy_state = deepcopy(dict(snapshot.get("strategy_state") or {}))
         self.events = deepcopy(list(snapshot.get("events") or []))
         self.decisions = deepcopy(list(snapshot.get("decisions") or []))
         self.reflections = [str(item) for item in snapshot.get("reflections") or []]
@@ -490,19 +632,305 @@ class RolePlanner(ABC):
     def _pass(actor: str) -> Action:
         return Action(actor, ActionType.PASS)
 
+    @staticmethod
+    def _ranked_target(
+        observation: Observation,
+        rule: Mapping[str, Any],
+        rng: random.Random,
+        *,
+        score_adjustments: Optional[Mapping[str, float]] = None,
+        excluded: Sequence[str] = (),
+        prefer_low_score: bool = False,
+    ) -> Optional[str]:
+        targets = [str(item) for item in rule.get("target_ids", [])]
+        excluded_set = {str(item) for item in excluded}
+        pool = [target for target in targets if target not in excluded_set] or targets
+        if not pool:
+            return None
+        scores = _event_suspicion(observation)
+        for target, amount in (score_adjustments or {}).items():
+            scores[str(target)] = scores.get(str(target), 0.0) + float(amount)
+        extreme = (
+            min(scores.get(target, 0.0) for target in pool)
+            if prefer_low_score
+            else max(scores.get(target, 0.0) for target in pool)
+        )
+        tied = sorted(
+            target for target in pool if scores.get(target, 0.0) == extreme
+        )
+        return rng.choice(tied)
+
+    @staticmethod
+    def _sheriff_order(
+        observation: Observation,
+        *,
+        score_adjustments: Optional[Mapping[str, float]] = None,
+    ) -> Action:
+        """Put the strongest public suspect as early as possible."""
+
+        actor = observation.viewer_id
+        rules = _legal_rules(observation)
+        clockwise = ActionType.SHERIFF_ORDER_CLOCKWISE
+        counterclockwise = ActionType.SHERIFF_ORDER_COUNTERCLOCKWISE
+        if clockwise not in rules:
+            return Action(actor, counterclockwise)
+        if counterclockwise not in rules:
+            return Action(actor, clockwise)
+
+        alive = sorted(
+            _visible_player_ids(observation, alive_only=True), key=_seat_key
+        )
+        if actor not in alive or len(alive) <= 2:
+            return Action(actor, clockwise)
+        anchor = alive.index(actor)
+        cw_order = alive[anchor + 1 :] + alive[:anchor]
+        ccw_order = list(reversed(cw_order))
+        suspicion = _event_suspicion(observation)
+        for target, amount in (score_adjustments or {}).items():
+            suspicion[str(target)] = suspicion.get(str(target), 0.0) + float(amount)
+
+        def order_score(order: Sequence[str]) -> float:
+            size = len(order)
+            return sum(
+                (size - index) * suspicion.get(player_id, 0.0)
+                for index, player_id in enumerate(order)
+            )
+
+        selected = counterclockwise if order_score(ccw_order) > order_score(cw_order) else clockwise
+        return Action(actor, selected)
+
+    def _plan_sheriff_action(
+        self,
+        observation: Observation,
+        memory: RoleMemory,
+        rng: random.Random,
+        *,
+        run_for_sheriff: bool,
+        stay_in_race: bool,
+        score_adjustments: Optional[Mapping[str, float]] = None,
+        excluded: Sequence[str] = (),
+        preferred_badge_targets: Sequence[str] = (),
+        destroy_badge: bool = False,
+    ) -> Optional[Action]:
+        """Handle role-independent sheriff powers and election mechanics."""
+
+        del memory
+        actor = observation.viewer_id
+        rules = _legal_rules(observation)
+        if ActionType.SHERIFF_RUN in rules:
+            if run_for_sheriff:
+                return Action(actor, ActionType.SHERIFF_RUN)
+            return self._pass(actor)
+
+        if ActionType.SHERIFF_WITHDRAW in rules:
+            if stay_in_race:
+                return self._pass(actor)
+            return Action(actor, ActionType.SHERIFF_WITHDRAW)
+
+        if ActionType.SHERIFF_VOTE in rules:
+            rule = rules[ActionType.SHERIFF_VOTE]
+            target = self._ranked_target(
+                observation,
+                rule,
+                rng,
+                score_adjustments=score_adjustments,
+                excluded=excluded,
+            )
+            if target is None:
+                return self._pass(actor)
+            return Action(actor, ActionType.SHERIFF_VOTE, target_id=target)
+
+        if (
+            ActionType.SHERIFF_ORDER_CLOCKWISE in rules
+            or ActionType.SHERIFF_ORDER_COUNTERCLOCKWISE in rules
+        ):
+            return self._sheriff_order(
+                observation,
+                score_adjustments=score_adjustments,
+            )
+
+        if ActionType.SHERIFF_SUMMARIZE in rules:
+            rule = rules[ActionType.SHERIFF_SUMMARIZE]
+            target = self._ranked_target(
+                observation,
+                rule,
+                rng,
+                score_adjustments=score_adjustments,
+                excluded=excluded,
+            )
+            if target is None:
+                # An engine should always provide a nomination target. Keeping
+                # this path legal makes standalone policies robust to an empty
+                # target list in an interrupted game.
+                return self._pass(actor)
+            names = {
+                str(player["id"]): str(player.get("name", player["id"]))
+                for player in observation.players
+            }
+            return Action(
+                actor,
+                ActionType.SHERIFF_SUMMARIZE,
+                target_id=target,
+                content=(
+                    f"After hearing everyone, I nominate {names.get(target, target)} "
+                    "for today's elimination. Compare your reads, then consolidate "
+                    "the vote there."
+                ),
+                metadata={"sheriff_nomination": target, "vote_intent": target},
+            )
+
+        badge_rules = {
+            kind: rules[kind]
+            for kind in (ActionType.SHERIFF_TRANSFER, ActionType.SHERIFF_DESTROY)
+            if kind in rules
+        }
+        if badge_rules:
+            transfer = badge_rules.get(ActionType.SHERIFF_TRANSFER)
+            if transfer is not None:
+                legal_targets = [str(item) for item in transfer.get("target_ids", [])]
+                for target in preferred_badge_targets:
+                    if str(target) in legal_targets:
+                        return Action(
+                            actor,
+                            ActionType.SHERIFF_TRANSFER,
+                            target_id=str(target),
+                        )
+            if destroy_badge and ActionType.SHERIFF_DESTROY in badge_rules:
+                return Action(actor, ActionType.SHERIFF_DESTROY)
+            if transfer is not None:
+                target = self._ranked_target(
+                    observation,
+                    transfer,
+                    rng,
+                    score_adjustments=score_adjustments,
+                    excluded=excluded,
+                    prefer_low_score=True,
+                )
+                if target is not None:
+                    return Action(
+                        actor, ActionType.SHERIFF_TRANSFER, target_id=target
+                    )
+            if ActionType.SHERIFF_DESTROY in badge_rules:
+                return Action(actor, ActionType.SHERIFF_DESTROY)
+            return self._pass(actor)
+        return None
+
 
 class WerewolfPlanner(RolePlanner):
     """Team-aware deception, night coordination, and threat removal."""
 
     role = Role.WEREWOLF
 
+    @staticmethod
+    def _wolf_ids(observation: Observation) -> list[str]:
+        actor = observation.viewer_id
+        teammates = {
+            str(item) for item in observation.private_facts.get("teammates", [])
+        }
+        teammates.add(actor)
+        alive = set(_visible_player_ids(observation, alive_only=True))
+        return sorted(teammates & alive, key=_seat_key)
+
+    def _fake_seer_speech(
+        self,
+        observation: Observation,
+        memory: RoleMemory,
+    ) -> Action:
+        actor = observation.viewer_id
+        names = {
+            str(player["id"]): str(player.get("name", player["id"]))
+            for player in observation.players
+        }
+        wolf_ids = set(self._wolf_ids(observation))
+        public_pool = [
+            player_id
+            for player_id in sorted(
+                _visible_player_ids(observation, alive_only=True), key=_seat_key
+            )
+            if player_id not in wolf_ids
+        ]
+        state = memory.strategy_state.setdefault("werewolf_sheriff", {})
+        ledger = state.setdefault("fake_seer_results", {})
+        if not ledger and public_pool:
+            # A stable fabricated gold-water result is safer than accidentally
+            # accusing a teammate; later speeches reuse this exact ledger.
+            ledger[public_pool[0]] = "not_werewolf"
+        checked_target = next(iter(ledger), None)
+
+        flow = state.get("badge_flow")
+        if not isinstance(flow, Mapping):
+            future = [target for target in public_pool if target not in ledger][:2]
+            if future:
+                fallback = next(
+                    (
+                        target
+                        for target in public_pool
+                        if target not in future and target not in ledger
+                    ),
+                    None,
+                )
+                flow = {
+                    "mode": "double" if len(future) == 2 else "single",
+                    "targets": future,
+                    "fallback_target": fallback,
+                }
+                state["badge_flow"] = deepcopy(flow)
+
+        metadata: dict[str, Any] = {"claim_role": Role.SEER.value}
+        parts = ["I am the Seer and I am running for Sheriff."]
+        if checked_target is not None:
+            metadata["defend_target"] = checked_target
+            parts.append(
+                f"My first check was {names.get(checked_target, checked_target)}, "
+                "who was not a werewolf."
+            )
+        if isinstance(flow, Mapping):
+            metadata["badge_flow"] = deepcopy(dict(flow))
+            labels = [names.get(str(item), str(item)) for item in flow["targets"]]
+            parts.append("My badge flow is " + " then ".join(labels) + ".")
+        return Action(
+            actor,
+            ActionType.SPEAK,
+            target_id=checked_target,
+            content=" ".join(parts),
+            metadata=metadata,
+        )
+
     def plan(self, observation: Observation, memory: RoleMemory, goal: RoleGoal, rng: random.Random) -> Action:
-        del memory, goal
+        del goal
         legal = _legal(observation)
         kind = ActionType.coerce(legal["action_type"])
         actor = observation.viewer_id
         targets = [str(item) for item in legal.get("target_ids", [])]
         teammates = [str(item) for item in observation.private_facts.get("teammates", [])]
+        wolf_ids = self._wolf_ids(observation)
+        bluffer = wolf_ids[0] if wolf_ids else actor
+        is_bluffer = actor == bluffer
+        memory.strategy_state.setdefault("werewolf_sheriff", {})[
+            "bluffer_id"
+        ] = bluffer
+
+        rules = _legal_rules(observation)
+        sheriff_adjustments: dict[str, float] = {
+            teammate: -30.0 for teammate in teammates
+        }
+        sheriff_excluded: Sequence[str] = teammates
+        if ActionType.SHERIFF_VOTE in rules:
+            sheriff_adjustments[bluffer] = 100.0
+            sheriff_excluded = ()
+        sheriff_action = self._plan_sheriff_action(
+            observation,
+            memory,
+            rng,
+            run_for_sheriff=is_bluffer,
+            stay_in_race=is_bluffer,
+            score_adjustments=sheriff_adjustments,
+            excluded=sheriff_excluded,
+            preferred_badge_targets=sorted(teammates, key=_seat_key),
+        )
+        if sheriff_action is not None:
+            return sheriff_action
+
         if kind is ActionType.WOLF_KILL:
             threat = {target: 0.0 for target in targets}
             for event in observation.events:
@@ -517,6 +945,11 @@ class WerewolfPlanner(RolePlanner):
                         threat[str(speaker)] += 8.0
             return Action(actor, kind, target_id=_best_target(targets, threat, rng))
         if kind is ActionType.SPEAK:
+            if observation.phase in (
+                Phase.SHERIFF_SPEECH,
+                Phase.SHERIFF_PK_SPEECH,
+            ) and is_bluffer:
+                return self._fake_seer_speech(observation, memory)
             return self._common_speech(observation, rng, excluded=teammates)
         if kind is ActionType.VOTE:
             adjustments: dict[str, float] = {item: -30.0 for item in teammates}
@@ -534,18 +967,191 @@ class SeerPlanner(RolePlanner):
 
     role = Role.SEER
 
+    @staticmethod
+    def _badge_flow(
+        observation: Observation,
+        memory: RoleMemory,
+    ) -> Optional[dict[str, Any]]:
+        state = memory.strategy_state.setdefault("seer_sheriff", {})
+        existing = state.get("badge_flow")
+        if isinstance(existing, Mapping):
+            return deepcopy(dict(existing))
+
+        results = {
+            str(target): str(result)
+            for target, result in (
+                observation.private_facts.get("seer_results") or {}
+            ).items()
+        }
+        candidates = [
+            player_id
+            for player_id in sorted(
+                _visible_player_ids(observation, alive_only=True), key=_seat_key
+            )
+            if player_id != observation.viewer_id and player_id not in results
+        ]
+        targets = candidates[:2]
+        if not targets:
+            return None
+        fallback = next(
+            (
+                player_id
+                for player_id in sorted(
+                    _visible_player_ids(observation, alive_only=True), key=_seat_key
+                )
+                if player_id != observation.viewer_id
+                and player_id not in targets
+                and player_id not in results
+            ),
+            None,
+        )
+        flow = {
+            "mode": "double" if len(targets) == 2 else "single",
+            "targets": targets,
+            "fallback_target": fallback,
+        }
+        state["badge_flow"] = deepcopy(flow)
+        return flow
+
+    @staticmethod
+    def _badge_recipient(
+        observation: Observation,
+        memory: RoleMemory,
+    ) -> Optional[str]:
+        flow = memory.strategy_state.get("seer_sheriff", {}).get("badge_flow")
+        if not isinstance(flow, Mapping):
+            return None
+        targets = [str(item) for item in flow.get("targets") or []]
+        if not targets:
+            return None
+        results = {
+            str(target): str(result)
+            for target, result in (
+                observation.private_facts.get("seer_results") or {}
+            ).items()
+        }
+
+        first = targets[0]
+        if first not in results:
+            return None
+        first_good = results[first] != Role.WEREWOLF.value
+        if len(targets) == 1 or targets[1] not in results:
+            return first if first_good else None
+
+        second = targets[1]
+        second_good = results[second] != Role.WEREWOLF.value
+        if first_good != second_good:
+            return first if first_good else second
+        if first_good and second_good:
+            return None
+        fallback = flow.get("fallback_target")
+        return str(fallback) if fallback is not None else None
+
+    def _campaign_speech(
+        self,
+        observation: Observation,
+        memory: RoleMemory,
+    ) -> Action:
+        actor = observation.viewer_id
+        names = {
+            str(player["id"]): str(player.get("name", player["id"]))
+            for player in observation.players
+        }
+        results = {
+            str(target): str(result)
+            for target, result in (
+                observation.private_facts.get("seer_results") or {}
+            ).items()
+        }
+        metadata: dict[str, Any] = {"claim_role": Role.SEER.value}
+        parts = ["I am the Seer and I am running for Sheriff."]
+        target: Optional[str] = None
+        if results:
+            # Preserve engine insertion order so the first-night result is
+            # reported before later checks.
+            target, result = next(iter(results.items()))
+            if result == Role.WEREWOLF.value:
+                metadata.update(
+                    {"accuse_target": target, "vote_intent": target}
+                )
+                parts.append(
+                    f"I checked {names.get(target, target)} and found a werewolf."
+                )
+            else:
+                metadata["defend_target"] = target
+                parts.append(
+                    f"I checked {names.get(target, target)} and found they are "
+                    "not a werewolf."
+                )
+        flow = self._badge_flow(observation, memory)
+        if flow is not None:
+            metadata["badge_flow"] = deepcopy(flow)
+            labels = [names.get(str(item), str(item)) for item in flow["targets"]]
+            parts.append("My badge flow is " + " then ".join(labels) + ".")
+        return Action(
+            actor,
+            ActionType.SPEAK,
+            target_id=target,
+            content=" ".join(parts),
+            metadata=metadata,
+        )
+
     def plan(self, observation: Observation, memory: RoleMemory, goal: RoleGoal, rng: random.Random) -> Action:
-        del memory, goal
+        del goal
         legal = _legal(observation)
         kind = ActionType.coerce(legal["action_type"])
         actor = observation.viewer_id
         targets = [str(item) for item in legal.get("target_ids", [])]
         results = observation.private_facts.get("seer_results") or {}
+        adjustments = {
+            str(target): (20.0 if result == Role.WEREWOLF.value else -8.0)
+            for target, result in results.items()
+        }
+
+        rules = _legal_rules(observation)
+        if (
+            ActionType.SHERIFF_TRANSFER in rules
+            or ActionType.SHERIFF_DESTROY in rules
+        ):
+            recipient = self._badge_recipient(observation, memory)
+            sheriff_action = self._plan_sheriff_action(
+                observation,
+                memory,
+                rng,
+                run_for_sheriff=True,
+                stay_in_race=True,
+                score_adjustments=adjustments,
+                preferred_badge_targets=([recipient] if recipient else ()),
+                destroy_badge=True,
+            )
+        else:
+            sheriff_action = self._plan_sheriff_action(
+                observation,
+                memory,
+                rng,
+                run_for_sheriff=True,
+                stay_in_race=True,
+                score_adjustments=adjustments,
+            )
+        if sheriff_action is not None:
+            return sheriff_action
+
         if kind is ActionType.SEER_CHECK:
             unchecked = [target for target in targets if target not in results]
+            flow = memory.strategy_state.get("seer_sheriff", {}).get("badge_flow")
+            if isinstance(flow, Mapping):
+                for planned_target in flow.get("targets") or ():
+                    planned_target = str(planned_target)
+                    if planned_target in unchecked:
+                        return Action(actor, kind, target_id=planned_target)
             pool = sorted(unchecked or targets)
             return Action(actor, kind, target_id=rng.choice(pool) if pool else None)
         if kind is ActionType.SPEAK:
+            if observation.phase in (
+                Phase.SHERIFF_SPEECH,
+                Phase.SHERIFF_PK_SPEECH,
+            ):
+                return self._campaign_speech(observation, memory)
             names = {str(player["id"]): str(player["name"]) for player in observation.players}
             wolves = sorted(str(pid) for pid, result in results.items() if result == Role.WEREWOLF.value)
             if wolves:
@@ -568,10 +1174,6 @@ class SeerPlanner(RolePlanner):
                 )
             return self._common_speech(observation, rng)
         if kind is ActionType.VOTE:
-            adjustments = {
-                str(target): (20.0 if result == Role.WEREWOLF.value else -8.0)
-                for target, result in results.items()
-            }
             return self._common_vote(observation, rng, score_adjustments=adjustments)
         return self._pass(actor)
 
@@ -582,7 +1184,16 @@ class WitchPlanner(RolePlanner):
     role = Role.WITCH
 
     def plan(self, observation: Observation, memory: RoleMemory, goal: RoleGoal, rng: random.Random) -> Action:
-        del memory, goal
+        del goal
+        sheriff_action = self._plan_sheriff_action(
+            observation,
+            memory,
+            rng,
+            run_for_sheriff=False,
+            stay_in_race=False,
+        )
+        if sheriff_action is not None:
+            return sheriff_action
         legal = _legal(observation)
         kind = ActionType.coerce(legal["action_type"])
         actor = observation.viewer_id
@@ -612,7 +1223,16 @@ class HunterPlanner(RolePlanner):
     role = Role.HUNTER
 
     def plan(self, observation: Observation, memory: RoleMemory, goal: RoleGoal, rng: random.Random) -> Action:
-        del memory, goal
+        del goal
+        sheriff_action = self._plan_sheriff_action(
+            observation,
+            memory,
+            rng,
+            run_for_sheriff=False,
+            stay_in_race=False,
+        )
+        if sheriff_action is not None:
+            return sheriff_action
         legal = _legal(observation)
         kind = ActionType.coerce(legal["action_type"])
         actor = observation.viewer_id
@@ -633,7 +1253,16 @@ class VillagerPlanner(RolePlanner):
     role = Role.VILLAGER
 
     def plan(self, observation: Observation, memory: RoleMemory, goal: RoleGoal, rng: random.Random) -> Action:
-        del memory, goal
+        del goal
+        sheriff_action = self._plan_sheriff_action(
+            observation,
+            memory,
+            rng,
+            run_for_sheriff=False,
+            stay_in_race=False,
+        )
+        if sheriff_action is not None:
+            return sheriff_action
         kind = ActionType.coerce(_legal(observation)["action_type"])
         actor = observation.viewer_id
         if kind is ActionType.SPEAK:
@@ -740,6 +1369,11 @@ class RoleAgent:
             "Never invent hidden roles, private events, or unavailable actions. Return "
             "exactly one JSON object with action_type, optional target_id, optional "
             "content, and optional metadata. Choose only from legal_actions. "
+            "For a public badge-flow declaration, metadata.badge_flow must be exactly "
+            '{"mode":"single|double","targets":["player_id"],'
+            '"fallback_target":"player_id or null"}; use exactly one target for '
+            "single and two for double, and never include inspection truth in it. "
+            "A Sheriff summary must set metadata.sheriff_nomination equal to target_id. "
             'Example JSON: {"action_type":"vote","target_id":"p2",'
             '"content":null,"metadata":{}}.'
         )
@@ -773,12 +1407,12 @@ class WerewolfAgent(RoleAgent):
         return RoleGoal(
             self.role,
             "Reach parity with the village while keeping the wolf team alive.",
-            ("Coordinate night eliminations with known wolf teammates.", "Remove information roles that threaten the wolf team.", "Maintain a believable public position and avoid exposing teammates."),
-            ("Use only visible public evidence and the supplied teammate list.", "Never target a known teammate at night."),
+            ("Coordinate night eliminations with known wolf teammates.", "Remove information roles that threaten the wolf team.", "Maintain a believable public position and avoid exposing teammates.", "Use one consistent low-seat bluffing candidate to contest the Sheriff badge."),
+            ("Use only visible public evidence and the supplied teammate list.", "Never target a known teammate at night.", "Keep fabricated checks and badge-flow declarations consistent."),
         )
 
     def _make_prompt(self) -> str:
-        return "You are the WEREWOLF role. Collaborate with teammate identities in private_facts, converge on a night target, and use careful public deception. Do not reveal the wolf team or claim access to hidden facts."
+        return "You are the WEREWOLF role. Collaborate with teammate identities in private_facts, converge on a night target, and use careful public deception. The lowest-seat living wolf should run for Sheriff and may bluff as Seer with a stable fabricated check ledger and badge flow; other wolves support that candidate. As Sheriff, choose speaking order, nominate a target, and transfer the badge strategically. Do not reveal the wolf team or claim access to hidden facts."
 
     def _make_planner(self) -> RolePlanner:
         return WerewolfPlanner()
@@ -791,12 +1425,12 @@ class SeerAgent(RoleAgent):
         return RoleGoal(
             self.role,
             "Help the village eliminate every werewolf using verified inspections.",
-            ("Inspect useful unchecked players each night.", "Preserve and communicate check results at strategically useful times.", "Align votes with confirmed wolf and non-wolf evidence."),
-            ("Treat only seer_results as verified private checks.", "Do not fabricate an inspection result."),
+            ("Inspect useful unchecked players each night.", "Preserve and communicate check results at strategically useful times.", "Run for Sheriff, publish a one- or two-night badge flow, and encode completed checks in any final badge transfer.", "Align votes with confirmed wolf and non-wolf evidence."),
+            ("Treat only seer_results as verified private checks.", "Do not fabricate an inspection result.", "A badge-flow declaration names future targets but never exposes private truth before a public claim."),
         )
 
     def _make_prompt(self) -> str:
-        return "You are the SEER role. Build a verified result ledger from seer_results, choose unchecked targets, and distinguish facts from social suspicion. Never present an unperformed check as a result."
+        return "You are the SEER role. Build a verified result ledger from seer_results, choose unchecked targets, and distinguish facts from social suspicion. Always run for Sheriff, stay in the race, report genuine completed checks, and publish a stable single- or double-night badge flow. On death, transfer or destroy the badge according to completed checks. Never present an unperformed check as a result."
 
     def _make_planner(self) -> RolePlanner:
         return SeerPlanner()
@@ -814,7 +1448,7 @@ class WitchAgent(RoleAgent):
         )
 
     def _make_prompt(self) -> str:
-        return "You are the WITCH role. Treat potions as scarce long-horizon resources. Use only the supplied night_victim and potions state, and base poison decisions on accumulated visible evidence rather than guesses."
+        return "You are the WITCH role. Treat potions as scarce long-horizon resources. Use only the supplied night_victim and potions state, and base poison decisions on accumulated visible evidence rather than guesses. You normally stay off the Sheriff ballot, but if elected you can choose speaking order, nominate a target, and transfer or destroy the badge using public evidence."
 
     def _make_planner(self) -> RolePlanner:
         return WitchPlanner()
@@ -832,7 +1466,7 @@ class HunterAgent(RoleAgent):
         )
 
     def _make_prompt(self) -> str:
-        return "You are the HUNTER role. Reason from public evidence while alive and keep a ranked suspect list for a possible final shot. Do not claim investigative powers or hidden information."
+        return "You are the HUNTER role. Reason from public evidence while alive and keep a ranked suspect list for a possible final shot. You normally stay off the Sheriff ballot, but if elected use every Sheriff power from public evidence and handle the badge before taking a death shot. Do not claim investigative powers or hidden information."
 
     def _make_planner(self) -> RolePlanner:
         return HunterPlanner()
@@ -850,7 +1484,7 @@ class VillagerAgent(RoleAgent):
         )
 
     def _make_prompt(self) -> str:
-        return "You are the VILLAGER role with no private investigative power. Infer from public speech, claims, and voting behavior; keep statements consistent with what an ordinary villager can know."
+        return "You are the VILLAGER role with no private investigative power. Infer from public speech, claims, and voting behavior; keep statements consistent with what an ordinary villager can know. You normally stay off the Sheriff ballot, but if elected choose speaking order, nominate a target, and transfer or destroy the badge from public evidence alone."
 
     def _make_planner(self) -> RolePlanner:
         return VillagerPlanner()

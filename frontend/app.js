@@ -30,15 +30,26 @@
     night_witch: { name: "女巫行动", title: "女巫正在抉择", subtitle: "解药与毒药均受库存及单夜行动规则约束。", icon: "⚗", track: 1 },
     night_witch_save: { name: "女巫解药", title: "女巫正在抉择", subtitle: "是否使用解药，将直接改变黎明时的死亡结算。", icon: "⚗", track: 1 },
     night_witch_poison: { name: "女巫毒药", title: "女巫正在抉择", subtitle: "毒药目标由规则层再次校验，避免越权行动。", icon: "⚗", track: 1 },
-    night_resolve: { name: "昨夜结算", title: "天光揭晓结果", subtitle: "规则引擎正在统一结算袭击、药剂与死亡状态。", icon: "☀", track: 2 },
-    dawn: { name: "公布结果", title: "天光揭晓结果", subtitle: "昨夜的死亡与公开身份将按规则向所有玩家公布。", icon: "☀", track: 2 },
-    day: { name: "白天", title: "白日议事", subtitle: "存活玩家基于公开信息更新判断。", icon: "☀", track: 3 },
-    day_discussion: { name: "自由发言", title: "白日议事", subtitle: "每位 Agent 正在陈述推理、回应质疑并建立公开承诺。", icon: "“", track: 3 },
-    discussion: { name: "自由发言", title: "白日议事", subtitle: "每位 Agent 正在陈述推理、回应质疑并建立公开承诺。", icon: "“", track: 3 },
-    day_vote: { name: "放逐投票", title: "放逐投票进行中", subtitle: "公开发言正在转化为票型，规则层将处理平票与无效票。", icon: "⌁", track: 4 },
-    vote: { name: "放逐投票", title: "放逐投票进行中", subtitle: "公开发言正在转化为票型，规则层将处理平票与无效票。", icon: "⌁", track: 4 },
-    hunter_shot: { name: "猎人开枪", title: "猎人的最后抉择", subtitle: "开枪权由死亡原因与规则配置共同决定。", icon: "⌖", track: 4 },
-    finished: { name: "对局结束", title: "终局已裁定", subtitle: "完整事件链已冻结，可进入复盘中心查看归因。", icon: "♜", track: 5 },
+    sheriff_run: { name: "上警报名", title: "警长竞选开始", subtitle: "所有玩家同时决定是否上警，选择将在收齐后统一公开。", icon: "♛", track: 2 },
+    sheriff_speech: { name: "警上发言", title: "候选人正在竞选", subtitle: "警上玩家依序发言，陈述身份、查验与警徽流安排。", icon: "♛", track: 2 },
+    sheriff_withdraw: { name: "退水阶段", title: "候选人确认退水", subtitle: "退水后不再拥有本轮被投票权与投票权。", icon: "↘", track: 2 },
+    sheriff_vote: { name: "警长投票", title: "警下玩家正在投票", subtitle: "只有原警下玩家拥有投票权，警徽将授予最高票候选人。", icon: "♛", track: 2 },
+    sheriff_pk_speech: { name: "警长竞选 PK", title: "平票候选人再次发言", subtitle: "平票玩家按首次发言顺序倒序进行 PK 发言。", icon: "⇄", track: 2 },
+    sheriff_pk_vote: { name: "警长 PK 投票", title: "警徽归属再次表决", subtitle: "若本轮再次平票，本局警徽将永久流失。", icon: "♛", track: 2 },
+    night_resolve: { name: "昨夜结算", title: "天光即将揭晓", subtitle: "夜间结果已结算，正等待竞选完成后统一公布。", icon: "☀", track: 2 },
+    dawn_reveal: { name: "公布结果", title: "天光揭晓结果", subtitle: "昨夜的死亡与公开身份现在向所有玩家公布。", icon: "☀", track: 3 },
+    dawn: { name: "公布结果", title: "天光揭晓结果", subtitle: "昨夜的死亡与公开身份将按规则向所有玩家公布。", icon: "☀", track: 3 },
+    sheriff_badge: { name: "处理警徽", title: "警长正在处理警徽", subtitle: "死亡警长可将警徽移交给存活玩家，或撕毁警徽。", icon: "♛", track: 3 },
+    sheriff_order: { name: "决定发言顺序", title: "警长正在安排发言", subtitle: "警长以自身座位为锚选择顺时针或逆时针发言。", icon: "↻", track: 4 },
+    day: { name: "白天", title: "白日议事", subtitle: "存活玩家基于公开信息更新判断。", icon: "☀", track: 4 },
+    day_discussion: { name: "白天发言", title: "白日议事", subtitle: "玩家依警长指定顺序发言，警长最后总结并归票。", icon: "“", track: 4 },
+    discussion: { name: "白天发言", title: "白日议事", subtitle: "每位 Agent 正在陈述推理、回应质疑并建立公开承诺。", icon: "“", track: 4 },
+    day_vote: { name: "放逐投票", title: "放逐投票进行中", subtitle: "警长拥有 1.5 票，其余存活玩家各拥有 1 票。", icon: "⌁", track: 5 },
+    vote: { name: "放逐投票", title: "放逐投票进行中", subtitle: "公开发言正在转化为票型，规则层将处理平票与无效票。", icon: "⌁", track: 5 },
+    day_pk_speech: { name: "放逐 PK 发言", title: "平票玩家正在 PK", subtitle: "平票玩家按最后发言顺序倒序陈述，其余玩家随后重新投票。", icon: "⇄", track: 5 },
+    day_pk_vote: { name: "放逐 PK 投票", title: "放逐票型再次表决", subtitle: "PK 玩家不得投票；若再次平票，本日无人出局。", icon: "⌁", track: 5 },
+    hunter_shot: { name: "猎人开枪", title: "猎人的最后抉择", subtitle: "开枪权由死亡原因与规则配置共同决定。", icon: "⌖", track: 5 },
+    finished: { name: "对局结束", title: "终局已裁定", subtitle: "完整事件链已冻结，可进入复盘中心查看归因。", icon: "♜", track: 6 },
   };
 
   const EVENT_META = {
@@ -57,6 +68,7 @@
     witch_poison: { icon: "⚗", label: "女巫使用毒药", category: "danger" },
     poison: { icon: "⚗", label: "毒杀", category: "danger" },
     hunter_shoot: { icon: "⌖", label: "猎人开枪", category: "danger" },
+    hunter_shot: { icon: "⌖", label: "猎人开枪", category: "danger" },
     game_started: { icon: "✦", label: "对局开始", category: "system" },
     game_start: { icon: "✦", label: "对局开始", category: "system" },
     role_assigned: { icon: "◆", label: "身份分配", category: "system" },
@@ -72,6 +84,28 @@
     game_end: { icon: "♜", label: "胜负裁定", category: "system" },
     game_finished: { icon: "♜", label: "胜负裁定", category: "system" },
     invalid_action: { icon: "!", label: "无效行动", category: "danger" },
+    sheriff_election_started: { icon: "♛", label: "警长竞选开始", category: "sheriff" },
+    sheriff_run_choice: { icon: "✋", label: "封存上警选择", category: "sheriff" },
+    sheriff_candidacy_result: { icon: "♛", label: "上警结果", category: "sheriff" },
+    sheriff_speech: { icon: "“", label: "警上发言", category: "sheriff" },
+    sheriff_pk_speech: { icon: "“", label: "警长竞选 PK 发言", category: "sheriff" },
+    sheriff_withdrawal_result: { icon: "↘", label: "退水结果", category: "sheriff" },
+    sheriff_withdraw_choice: { icon: "↘", label: "封存退水选择", category: "sheriff" },
+    sheriff_vote_started: { icon: "♛", label: "警长投票开始", category: "sheriff" },
+    sheriff_vote_cast: { icon: "♛", label: "封存警长票", category: "sheriff" },
+    sheriff_vote_result: { icon: "♛", label: "警长票型", category: "sheriff" },
+    sheriff_pk_started: { icon: "⇄", label: "警长竞选 PK", category: "sheriff" },
+    sheriff_elected: { icon: "♛", label: "警长当选", category: "sheriff" },
+    sheriff_election_void: { icon: "♛", label: "警徽流失", category: "sheriff" },
+    dawn_reveal_started: { icon: "☀", label: "公布夜间结果", category: "system" },
+    sheriff_order: { icon: "↻", label: "发言顺序", category: "sheriff" },
+    sheriff_summary: { icon: "♛", label: "警长归票", category: "sheriff" },
+    badge_transfer_required: { icon: "♛", label: "等待移交警徽", category: "sheriff" },
+    badge_transferred: { icon: "♛", label: "警徽移交", category: "sheriff" },
+    badge_destroyed: { icon: "×", label: "警徽撕毁", category: "sheriff" },
+    day_vote_result: { icon: "⌁", label: "放逐票型", category: "vote" },
+    day_pk_started: { icon: "⇄", label: "放逐 PK", category: "vote" },
+    day_pk_speech: { icon: "“", label: "放逐 PK 发言", category: "speech" },
   };
 
   const store = {
@@ -146,6 +180,12 @@
     return clamp(number <= 1 ? number * 100 : number);
   }
 
+  function booleanValue(value, fallback = false) {
+    if (value === undefined || value === null) return fallback;
+    if (typeof value === "string") return !["false", "0", "no", "off", ""].includes(value.toLowerCase());
+    return Boolean(value);
+  }
+
   function normalizeTeam(value, role) {
     const normalized = String(value || "").toLowerCase();
     if (["werewolf", "werewolves", "wolf", "wolves", "狼人", "狼人阵营"].includes(normalized)) return "wolf";
@@ -169,6 +209,7 @@
       model: firstDefined(player.model, player.agent_version, player.strategy),
       deathReason: firstDefined(player.deathReason, player.death_reason, player.eliminated_by, null),
       deathRound: firstDefined(player.deathRound, player.death_round, null),
+      isSheriff: booleanValue(firstDefined(player.is_sheriff, player.isSheriff), false),
     };
   }
 
@@ -179,13 +220,38 @@
       "reveal_roles_on_death", "reveal_vote_choices", "shuffle_roles",
       "vote_tie_policy", "tie_rule", "witch_one_potion_per_night",
       "allow_witch_self_save", "hunter_can_shoot_if_poisoned",
-      "discussion_rounds", "max_rounds", "strategy",
+      "discussion_rounds", "max_rounds", "strategy", "enable_sheriff",
     ];
     const sanitized = Object.fromEntries(safeKeys
       .filter((key) => Object.prototype.hasOwnProperty.call(config, key))
       .map((key) => [key, Array.isArray(config[key]) ? [...config[key]] : config[key]]));
     if (includeSeed && Object.prototype.hasOwnProperty.call(config, "seed")) sanitized.seed = config.seed;
     return sanitized;
+  }
+
+  function normalizePlayerIds(value) {
+    if (!value) return [];
+    const values = Array.isArray(value) ? value : typeof value === "object" ? Object.keys(value) : [value];
+    return [...new Set(values.map((item) => String(firstDefined(item?.player_id, item?.id, item))).filter(Boolean))];
+  }
+
+  function normalizeSheriff(value, config = {}) {
+    const source = value && typeof value === "object" ? value : {};
+    const enabled = booleanValue(firstDefined(source.enabled, source.enable_sheriff, config.enable_sheriff), false);
+    const holderId = firstDefined(source.holder_id, source.holder, source.sheriff_id, null);
+    return {
+      enabled,
+      badgeStatus: String(firstDefined(source.badge_status, source.status, holderId ? "holder" : enabled ? "unassigned" : "void")),
+      holderId: holderId === null || holderId === undefined ? null : String(holderId),
+      candidates: normalizePlayerIds(firstDefined(source.candidates, source.candidate_ids, [])),
+      withdrawn: normalizePlayerIds(firstDefined(source.withdrawn, source.withdrawn_ids, [])),
+      pkCandidates: normalizePlayerIds(firstDefined(source.pk_candidates, source.pk_candidate_ids, [])),
+      voteRound: Number(firstDefined(source.vote_round, source.round, 0)),
+      speechOrder: normalizePlayerIds(firstDefined(source.speech_order, source.election_speech_order, [])),
+      dayDirection: firstDefined(source.day_direction, source.direction, null),
+      daySpeechOrder: normalizePlayerIds(firstDefined(source.day_speech_order, source.current_speech_order, [])),
+      nominationTarget: firstDefined(source.nomination_target, source.nomination_target_id, source.sheriff_nomination, null),
+    };
   }
 
   function normalizePendingAction(pending) {
@@ -307,6 +373,7 @@
       mode: firstDefined(source.mode, source.game_mode, source.config?.human_player || source.config?.human_players?.length ? "mixed" : "ai"),
       model: firstDefined(source.model, source.strategy, source.agent_model, null),
       config: sanitizeConfig(source.config, { includeSeed: store.perspective === "observer" }),
+      sheriff: normalizeSheriff(firstDefined(source.sheriff, source.sheriff_state, payload.sheriff), source.config || {}),
       createdAt: firstDefined(source.created_at, source.started_at, payload.created_at),
       updatedAt: firstDefined(source.updated_at, payload.updated_at),
     };
@@ -327,6 +394,7 @@
         model: player.model,
         deathReason: null,
         deathRound: player.deathRound,
+        isSheriff: player.isSheriff,
       })),
       round: game.round,
       phase: game.phase,
@@ -340,6 +408,7 @@
       mode: game.mode,
       model: game.model,
       config: sanitizeConfig(game.config, { includeSeed: store.perspective === "observer" }),
+      sheriff: cloneProjection(game.sheriff, normalizeSheriff(null, game.config)),
       createdAt: game.createdAt,
       // The referee timestamp advances on private decisions.  Do not retain
       // the last omniscient value while transitioning to a lower privilege.
@@ -598,6 +667,7 @@
       seed: seedValue ? Number(seedValue) : Math.floor(Math.random() * 1_000_000),
       strategy: values.get("strategy"),
       vote_tie_policy: tieRule,
+      enable_sheriff: values.get("enable_sheriff") === "on",
       human_player: mode === "mixed" ? humanSeat : null,
       human_players: mode === "mixed" ? [humanSeat] : [],
     };
@@ -761,6 +831,9 @@
     const key = String(phase || "setup").toLowerCase();
     if (PHASE_META[key]) return PHASE_META[key];
     if (key.includes("night")) return PHASE_META.night;
+    if (key.includes("sheriff") || key.includes("badge")) return PHASE_META.sheriff_run;
+    if (key.includes("dawn") || key.includes("reveal")) return PHASE_META.dawn_reveal;
+    if (key.includes("pk") && key.includes("speak")) return PHASE_META.day_pk_speech;
     if (key.includes("discuss") || key.includes("speak")) return PHASE_META.day_discussion;
     if (key.includes("vote")) return PHASE_META.day_vote;
     if (key.includes("finish") || key.includes("game_over")) return PHASE_META.finished;
@@ -787,6 +860,7 @@
   function eventInfo(type) {
     const key = String(type || "event").toLowerCase();
     if (EVENT_META[key]) return EVENT_META[key];
+    if (key.includes("sheriff") || key.includes("badge")) return { icon: "♛", label: "警长事件", category: "sheriff" };
     const match = Object.keys(EVENT_META).find((candidate) => key.includes(candidate));
     return match ? EVENT_META[match] : { icon: "·", label: key.replaceAll("_", " "), category: "action" };
   }
@@ -801,8 +875,51 @@
     if (type === "wolf_team") return `${actor} 已获得狼队同伴信息。`;
     if (["phase_started", "phase_changed", "phase_change"].includes(type)) return `裁判进入「${phaseInfo(firstDefined(data.phase, event.phase)).name}」阶段。`;
     if (type === "night_started") return `第 ${event.round || store.game?.round || 1} 夜开始，所有玩家闭眼。`;
+    if (type === "dawn_reveal_started") return `第 ${event.round || store.game?.round || 1} 天黎明，法官开始公布昨夜结果。`;
     if (type === "day_started") return `第 ${event.round || store.game?.round || 1} 天讨论开始。`;
     if (type === "vote_started") return `第 ${event.round || store.game?.round || 1} 天放逐投票开始。`;
+    if (type === "sheriff_election_started") return "首日警长竞选开始，所有玩家正在同时决定是否上警。";
+    if (type === "sheriff_run_choice") return `${actor} 的上警选择已封存：${data.running ? "上警" : "不上警"}。`;
+    if (type === "sheriff_candidacy_result") {
+      const candidates = playerList(firstDefined(data.candidates, data.candidate_ids, []));
+      return candidates ? `上警玩家：${candidates}。` : "无人上警，本局警徽流失。";
+    }
+    if (type === "sheriff_speech") return event.message || `${actor} 完成警上发言。`;
+    if (type === "sheriff_withdrawal_result") {
+      const withdrawn = playerList(firstDefined(data.withdrawn, data.withdrawn_ids, []));
+      const remaining = playerList(firstDefined(data.candidates, data.remaining_candidates, []));
+      return `${withdrawn ? `退水玩家：${withdrawn}` : "无人退水"}${remaining ? `；留在警上：${remaining}` : ""}。`;
+    }
+    if (type === "sheriff_withdraw_choice") return `${actor} 的退水选择已封存：${data.withdrew ? "退水" : "继续竞选"}。`;
+    if (type === "sheriff_vote_started") return `${firstDefined(data.pk, data.is_pk, Number(data.round) > 1, false) ? "警长 PK 投票" : "警长投票"}开始，原警下玩家拥有投票权。`;
+    if (type === "sheriff_vote_cast") return data.abstained ? `${actor} 的弃票已封存。` : `${actor} 的警长票已封存：${playerName(event.target)}。`;
+    if (type === "sheriff_vote_result") return `${firstDefined(data.pk, data.is_pk, Number(data.round) > 1, false) ? "PK " : ""}警长票型：${formatVoteTally(firstDefined(data.tally, data.vote_tally, data.totals, data.votes)) || "无人投票"}。`;
+    if (type === "sheriff_pk_started") return `警长竞选出现平票，${playerList(firstDefined(data.candidates, data.pk_candidates, [])) || "平票候选人"}进入 PK。`;
+    if (type === "sheriff_elected") {
+      const elected = playerName(firstDefined(event.target, data.holder_id, data.sheriff_id, data.elected_id));
+      return `${elected} 获得警徽，成为本局警长。`;
+    }
+    if (type === "sheriff_election_void") return `警长竞选${data.reason ? `因${String(data.reason)}` : ""}流局，本局此后不再有警长。`;
+    if (type === "sheriff_order") {
+      const order = playerList(firstDefined(data.speech_order, data.day_speech_order, data.order, []));
+      const direction = directionLabel(firstDefined(data.direction, data.day_direction));
+      return `${actor} 选择${direction || "发言方向"}${order ? `，顺序为 ${order}` : ""}。`;
+    }
+    if (type === "sheriff_summary") {
+      const nomination = firstDefined(event.target, data.nomination_target, data.target_id);
+      const suffix = nomination ? `（归票：${playerName(nomination)}）` : "";
+      return `${event.message || `${actor} 完成警长总结`}${suffix}`;
+    }
+    if (type === "badge_transfer_required") return `${actor} 已出局，正在决定移交或撕毁警徽。`;
+    if (type === "badge_transferred") {
+      const nextHolder = playerName(firstDefined(event.target, data.to, data.new_holder_id, data.holder_id));
+      return `${actor} 将警徽移交给 ${nextHolder}。`;
+    }
+    if (type === "badge_destroyed") return `${actor} 选择撕毁警徽，本局此后不再有警长。`;
+    if (type === "day_vote_result") return `放逐票型：${formatVoteTally(firstDefined(data.tally, data.vote_tally, data.totals, data.votes)) || "暂无有效票"}。`;
+    if (type === "day_pk_started") return `放逐投票出现平票，${playerList(firstDefined(data.candidates, data.pk_candidates, [])) || "平票玩家"}进入 PK。`;
+    if (type === "day_pk_speech") return event.message || `${actor} 完成放逐 PK 发言。`;
+    if (type === "hunter_shot") return `${actor}${target ? ` 向 ${target} 开枪` : " 已执行猎人技能"}。`;
     if (["wolf_kill", "wolf_vote"].includes(type)) return `${actor}${target ? ` 将袭击意向指向 ${target}` : " 已提交袭击意向"}。`;
     if (["seer_check", "check"].includes(type)) return `${actor}${target ? ` 查验了 ${target}` : " 完成查验"}${data.result ? `，结果为${normalizeTeam(data.result) === "wolf" ? "狼人阵营" : "好人阵营"}` : ""}。`;
     if (["vote", "vote_cast"].includes(type)) return `${actor}${target ? ` 投票给 ${target}` : " 已提交投票"}。`;
@@ -813,6 +930,35 @@
     }
     if (["game_finished", "game_over", "game_end"].includes(type)) return `${winnerName(firstDefined(data.winner, data.winning_team, store.game?.winner))}获胜，对局完成。`;
     return event.message;
+  }
+
+  function playerList(value) {
+    return normalizePlayerIds(value).map(playerName).join("、");
+  }
+
+  function directionLabel(value) {
+    const key = String(value || "").toLowerCase();
+    if (["clockwise", "cw", "顺时针"].includes(key)) return "顺时针发言";
+    if (["counterclockwise", "counter_clockwise", "ccw", "逆时针"].includes(key)) return "逆时针发言";
+    return value ? String(value) : "";
+  }
+
+  function formatVoteTally(value) {
+    if (!value) return "";
+    if (Array.isArray(value)) {
+      return value.map((item) => {
+        if (item && typeof item === "object") {
+          const id = firstDefined(item.target_id, item.player_id, item.id, item.target);
+          const votes = firstDefined(item.weighted_votes, item.weight, item.votes, item.count, item.total, 0);
+          return `${playerName(id)} ${Number(votes) % 1 ? votes : Number(votes) > 3 ? Number(votes) / 2 : votes} 票`;
+        }
+        return playerName(item);
+      }).join("、");
+    }
+    if (typeof value === "object") {
+      return Object.entries(value).map(([id, votes]) => `${playerName(id)} ${Number(votes)} 票`).join("、");
+    }
+    return String(value);
   }
 
   function causeLabel(cause) {
@@ -851,7 +997,28 @@
     $("#center-title").textContent = game ? phase.name : "等待开局";
     $("#center-hint").textContent = game ? `${game.players.filter((p) => p.alive).length} / ${game.players.length} ALIVE` : "No active match";
     $("#phase-emblem").textContent = phase.icon;
+    renderCenterSheriff();
     populatePerspectives();
+  }
+
+  function renderCenterSheriff() {
+    const element = $("#center-sheriff");
+    const sheriff = store.game?.sheriff;
+    if (!sheriff?.enabled) {
+      element.hidden = true;
+      element.innerHTML = "";
+      return;
+    }
+    const holder = sheriff.holderId ? playerName(sheriff.holderId) : null;
+    const statusLabels = { destroyed: "警徽已撕毁", void: "本局无警长", unassigned: "警徽待选出", holder: holder ? `警长 · ${holder}` : "警长已产生" };
+    const phase = String(store.game?.phase || "");
+    const showDayOrder = [
+      "day_discussion", "day_vote", "day_pk_speech", "day_pk_vote", "hunter_shot",
+    ].includes(phase);
+    const order = showDayOrder ? sheriff.daySpeechOrder.map(playerName) : [];
+    const direction = showDayOrder ? directionLabel(sheriff.dayDirection) : "";
+    element.hidden = false;
+    element.innerHTML = `<span>♛ ${escapeHtml(statusLabels[sheriff.badgeStatus] || statusLabels.unassigned)}</span>${order.length ? `<small>${direction ? `${escapeHtml(direction)} · ` : ""}${escapeHtml(order.join(" → "))}</small>` : ""}`;
   }
 
   function populatePerspectives() {
@@ -873,11 +1040,14 @@
 
   function renderPhaseTrack() {
     const track = phaseInfo(store.game?.phase).track;
-    $$(".phase-node", $("#phase-track")).forEach((node, index) => {
-      node.classList.toggle("done", Boolean(store.game) && (index < track || track >= 5));
-      node.classList.toggle("active", !store.game ? index === 0 : index === Math.min(track, 4) && track < 5);
+    const nodes = $$(".phase-node", $("#phase-track"));
+    nodes.forEach((node, index) => {
+      const skipped = Boolean(store.game) && node.dataset.phase === "sheriff" && !store.game.sheriff?.enabled;
+      node.classList.toggle("skipped", skipped);
+      node.classList.toggle("done", !skipped && Boolean(store.game) && (index < track || track >= nodes.length));
+      node.classList.toggle("active", !skipped && (!store.game ? index === 0 : index === Math.min(track, nodes.length - 1) && track < nodes.length));
       const icon = $("i", node);
-      icon.textContent = node.classList.contains("done") ? "✓" : String(index + 1);
+      icon.textContent = skipped ? "–" : node.classList.contains("done") ? "✓" : String(index + 1);
     });
     $$(".phase-line", $("#phase-track")).forEach((line, index) => line.classList.toggle("done", Boolean(store.game) && index < track));
   }
@@ -888,7 +1058,25 @@
     const players = store.game?.players || [];
     if (!players.length) return;
     const lastEvent = store.events.at(-1);
-    const latestSpeech = [...store.events].reverse().find((event) => eventInfo(event.type).category === "speech");
+    const latestSpeech = [...store.events].reverse().find(isTranscriptEvent);
+    const sheriff = store.game?.sheriff || normalizeSheriff(null, store.game?.config);
+    const phase = String(store.game?.phase || "");
+    const electionActive = [
+      "sheriff_run", "sheriff_speech", "sheriff_withdraw", "sheriff_vote", "sheriff_pk_speech", "sheriff_pk_vote",
+    ].includes(phase);
+    const sheriffPkActive = phase === "sheriff_pk_speech" || phase === "sheriff_pk_vote";
+    const dayPkActive = phase === "day_pk_speech" || phase === "day_pk_vote";
+    // sheriff.pk_candidates is intentionally election-only.  Exile-PK
+    // candidates are recovered from the public day_pk_started event so the UI
+    // never revives a historical sheriff runoff as the current exile runoff.
+    const dayPkEvent = dayPkActive
+      ? [...store.events].reverse().find((event) => event.type === "day_pk_started" && Number(event.round) === Number(store.game?.round))
+      : null;
+    const activePkCandidates = sheriffPkActive
+      ? sheriff.pkCandidates
+      : dayPkActive
+        ? normalizePlayerIds(firstDefined(dayPkEvent?.data?.candidates, dayPkEvent?.data?.pk_candidates, []))
+        : [];
     players.forEach((player, index) => {
       const angle = -Math.PI / 2 + (Math.PI * 2 * index) / players.length;
       const radiusX = players.length > 9 ? 43 : 40;
@@ -908,15 +1096,30 @@
         icon = player.alive ? "●" : "†";
         teamClass = player.alive ? "good" : "unknown";
       }
+      const isSheriff = player.isSheriff || sheriff.holderId === player.id;
+      // Candidate/withdrawal/runoff arrays remain in the replayable public
+      // state after their phase ends.  Only render them as live seat markers
+      // while the corresponding election or runoff is actually in progress.
+      const isCandidate = electionActive && sheriff.candidates.includes(player.id) && !sheriff.withdrawn.includes(player.id);
+      const isWithdrawn = electionActive && sheriff.withdrawn.includes(player.id);
+      const isPk = activePkCandidates.includes(player.id);
+      const pkLabel = sheriffPkActive ? "警长竞选 PK" : "放逐 PK";
+      const isNominated = sheriff.nominationTarget !== null && String(sheriff.nominationTarget) === player.id;
+      const markers = [
+        isSheriff ? `<span class="seat-marker badge" title="警长">♛</span>` : "",
+        isPk ? `<span class="seat-marker pk">PK</span>` : isWithdrawn ? `<span class="seat-marker withdrawn">退水</span>` : isCandidate ? `<span class="seat-marker candidate">警上</span>` : "",
+        isNominated ? `<span class="seat-marker nominated">归票</span>` : "",
+      ].filter(Boolean).join("");
       const seat = document.createElement("article");
-      seat.className = `player-seat ${teamClass}${player.alive ? "" : " dead"}${latestSpeech?.actor && String(latestSpeech.actor) === player.id ? " speaking" : ""}${lastEvent?.target && String(lastEvent.target) === player.id ? " targeted" : ""}`;
+      seat.className = `player-seat ${teamClass}${player.alive ? "" : " dead"}${latestSpeech?.actor && String(latestSpeech.actor) === player.id ? " speaking" : ""}${lastEvent?.target && String(lastEvent.target) === player.id ? " targeted" : ""}${isSheriff ? " sheriff-holder" : ""}${isCandidate ? " sheriff-candidate" : ""}${isWithdrawn ? " sheriff-withdrawn" : ""}${isPk ? " sheriff-pk" : ""}${isNominated ? " sheriff-nominated" : ""}`;
       seat.style.setProperty("--seat-x", `${x}%`);
       seat.style.setProperty("--seat-y", `${y}%`);
-      seat.title = `${player.seat}号 ${player.name} · ${label}`;
+      seat.title = `${player.seat}号 ${player.name} · ${label}${isSheriff ? " · 警长" : isPk ? ` · ${pkLabel}` : isWithdrawn ? " · 已退水" : isCandidate ? " · 警上候选" : ""}`;
       seat.innerHTML = `
         <span class="seat-number">${escapeHtml(player.seat)}</span>
         <div class="seat-avatar">${escapeHtml(icon)}</div>
         <div class="seat-copy"><strong>${escapeHtml(player.name)}</strong><span>${escapeHtml(label)}</span></div>
+        <div class="seat-markers">${markers}</div>
         <span class="seat-badge ${player.controller === "human" ? "human" : ""}">${player.controller === "human" ? "HUMAN" : escapeHtml(player.model || "AGENT")}</span>`;
       ring.appendChild(seat);
     });
@@ -965,7 +1168,7 @@
 
   function renderConversations() {
     const list = $("#conversation-list");
-    const speeches = store.events.filter((event) => eventInfo(event.type).category === "speech" || ["speak", "speech", "statement", "day_speech"].some((key) => event.type.includes(key)));
+    const speeches = store.events.filter(isTranscriptEvent);
     if (!speeches.length) {
       list.innerHTML = `<div class="empty-state inline-empty"><span class="empty-glyph">“</span><div><strong>尚无公开发言</strong><p>进入白天讨论后，Agent 的发言会在此展开。</p></div></div>`;
       return;
@@ -973,12 +1176,41 @@
     list.innerHTML = speeches.slice(-60).map((event) => {
       const player = store.game?.players.find((item) => String(item.id) === String(event.actor));
       const role = roleInfo(player?.role);
+      const context = speechContext(event);
+      const metadata = firstDefined(event.metadata, event.data?.metadata, {});
+      const badgeFlow = firstDefined(metadata?.badge_flow, event.data?.badge_flow, event.badge_flow);
+      const nomination = firstDefined(metadata?.sheriff_nomination, event.data?.sheriff_nomination, event.data?.nomination_target);
       return `<article class="speech-row">
         <div class="speech-avatar">${escapeHtml(role.icon)}</div>
-        <div><div class="speech-meta"><strong>${escapeHtml(player?.name || event.actor || "未知 Agent")}</strong><span>${escapeHtml(player?.role ? role.name : "公开频道")}</span><time>${escapeHtml(formatEventTime(event))}</time></div><p class="speech-bubble">${escapeHtml(displayEventMessage(event))}</p></div>
+        <div><div class="speech-meta"><strong>${escapeHtml(player?.name || event.actor || "未知 Agent")}</strong><span>${escapeHtml(player?.role ? role.name : "公开频道")}</span>${context ? `<span class="speech-context">${escapeHtml(context)}</span>` : ""}<time>${escapeHtml(formatEventTime(event))}</time></div><p class="speech-bubble">${escapeHtml(displayEventMessage(event))}</p>${renderBadgeFlow(badgeFlow)}${nomination ? `<div class="nomination-chip">♛ 归票建议 · ${escapeHtml(playerName(nomination))}</div>` : ""}</div>
       </article>`;
     }).join("");
     requestAnimationFrame(() => { list.scrollTop = list.scrollHeight; });
+  }
+
+  function isTranscriptEvent(event) {
+    const type = String(event?.type || "");
+    return eventInfo(type).category === "speech"
+      || ["speak", "speech", "statement", "day_speech", "sheriff_speech", "sheriff_pk_speech", "sheriff_summary", "day_pk_speech"].some((key) => type.includes(key));
+  }
+
+  function speechContext(event) {
+    const type = String(event?.type || "");
+    const phase = String(event?.phase || "");
+    if (type.includes("sheriff_summary")) return "警长总结 · 归票";
+    if (type.includes("sheriff_speech") || phase.includes("sheriff_speech")) return "警上发言";
+    if (type.includes("day_pk_speech") || phase.includes("day_pk_speech")) return "放逐 PK";
+    if (phase.includes("sheriff_pk_speech")) return "警长竞选 PK";
+    return "";
+  }
+
+  function renderBadgeFlow(flow) {
+    if (!flow || typeof flow !== "object") return "";
+    const targets = normalizePlayerIds(firstDefined(flow.targets, flow.target_ids, [])).slice(0, 2);
+    if (!targets.length) return "";
+    const mode = String(firstDefined(flow.mode, targets.length > 1 ? "double" : "single")).toLowerCase();
+    const fallback = firstDefined(flow.fallback_target, flow.fallback_target_id, null);
+    return `<div class="badge-flow-card"><div><span>♛</span><strong>${mode === "double" ? "双夜警徽流" : "单夜警徽流"}</strong></div><p>${targets.map((id, index) => `第${index + 1}验 ${playerName(id)}`).map(escapeHtml).join(" · ")}${fallback ? `<br>外置位：${escapeHtml(playerName(fallback))}` : ""}</p></div>`;
   }
 
   function metricValue(evaluation, ...paths) {
@@ -1008,6 +1240,30 @@
     const points = firstDefined(evaluation.turning_points, evaluation.replay?.key_turning_points, store.game?.turningPoints, []);
     const latest = Array.isArray(points) ? points.at(-1) : null;
     $("#turning-point").innerHTML = `<span>关键节点${latest?.seq ? ` · #${escapeHtml(latest.seq)}` : ""}</span><p>${escapeHtml(firstDefined(latest?.summary, latest?.description, latest?.reason, "对局开始后，将基于事件序列识别局势转折。"))}</p>`;
+    renderSheriffMetrics(evaluation);
+  }
+
+  function renderSheriffMetrics(evaluation) {
+    const card = $("#sheriff-metric-card");
+    const sheriff = firstDefined(evaluation?.process_metrics?.sheriff, evaluation?.sheriff_metrics, evaluation?.sheriff);
+    if (!sheriff || typeof sheriff !== "object") {
+      card.hidden = true;
+      card.innerHTML = "";
+      return;
+    }
+    const election = sheriff.election || {};
+    const leadership = sheriff.leadership || {};
+    const flow = firstDefined(sheriff.badge_flow, sheriff.badgeFlow, {});
+    const winner = election.winner_id ? playerName(election.winner_id) : election.void ? "竞选流局" : "尚未产生";
+    const response = percent(leadership.nomination_response_rate);
+    const flowRate = percent(flow.execution_rate);
+    card.hidden = false;
+    card.innerHTML = `<div class="sheriff-metric-title"><span>♛</span><strong>警长表现</strong><small>SCHEMA 1.1</small></div><div class="sheriff-metric-grid">
+      <div><span>警徽归属</span><b>${escapeHtml(winner)}</b></div>
+      <div><span>归票响应</span><b>${response === null ? "—" : `${Math.round(response)}%`}</b></div>
+      <div><span>关键 1.5 票</span><b>${escapeHtml(firstDefined(leadership.decisive_weighted_vote_count, 0))}</b></div>
+      <div><span>警徽流执行</span><b>${flowRate === null ? "—" : `${Math.round(flowRate)}%`}</b></div>
+    </div>`;
   }
 
   function renderHumanTurn() {
@@ -1021,13 +1277,13 @@
       closeHumanComposer({ restoreActions: false, restoreFocus: false });
       return;
     }
-    $("#human-prompt").textContent = firstDefined(pending?.prompt, "轮到你行动");
+    $("#human-prompt").textContent = humanPrompt(pending, store.game.phase);
     $("#human-description").textContent = `当前阶段：${phaseInfo(firstDefined(pending?.phase, store.game.phase)).name}。行动提交后将由规则层校验。`;
     const actions = asArray(firstDefined(pending?.legal_actions, pending?.actions, []));
     const container = $("#human-actions");
     const pendingKey = [actor, firstDefined(pending?.phase, store.game.phase), firstDefined(pending?.round, store.game.round)].join("|");
     if (!actions.length) {
-      container.innerHTML = `<button class="human-action" type="button" data-human-action="pass">跳过行动</button>`;
+      container.innerHTML = `<button class="human-action" type="button" data-human-action="pass">${escapeHtml(passLabel(firstDefined(pending?.phase, store.game.phase)))}</button>`;
       container.__actions = [];
       closeHumanComposer({ restoreActions: true, restoreFocus: false });
     } else {
@@ -1036,16 +1292,17 @@
         const actionType = firstDefined(action.action_type, action.type, "pass");
         const targets = firstDefined(action.target_ids, action.targets, []);
         if (Array.isArray(targets) && targets.length) {
-          targets.forEach((target) => buttons.push({ actionType, target, actor, pendingKey, contentRequired: action.content_required === true, description: action.description, label: `${actionLabel(actionType)} · ${playerName(target)}` }));
+          targets.forEach((target) => buttons.push({ actionType, target, actor, pendingKey, contentRequired: action.content_required === true, description: action.description, label: `${actionLabel(actionType, pending?.phase)} · ${actionTargetPrefix(actionType, pending?.phase)}${playerName(target)}` }));
         } else {
-          buttons.push({ actionType, target: null, actor, pendingKey, contentRequired: action.content_required === true, description: action.description, label: actionLabel(actionType) });
+          buttons.push({ actionType, target: null, actor, pendingKey, contentRequired: action.content_required === true, description: action.description, label: actionLabel(actionType, pending?.phase) });
         }
-        if (action.can_pass) buttons.push({ actionType: "pass", target: null, actor, pendingKey, label: "跳过" });
+        if (action.can_pass) buttons.push({ actionType: "pass", target: null, actor, pendingKey, label: passLabel(firstDefined(pending?.phase, store.game.phase)) });
       });
-      container.innerHTML = buttons.slice(0, 18).map((item, index) => `<button class="human-action" type="button" data-action-index="${index}">${escapeHtml(item.label)}</button>`).join("");
-      container.__actions = buttons;
+      const uniqueButtons = buttons.filter((item, index, values) => values.findIndex((candidate) => humanActionKey(candidate) === humanActionKey(item)) === index);
+      container.innerHTML = uniqueButtons.slice(0, 24).map((item, index) => `<button class="human-action${item.actionType === "sheriff_destroy" ? " danger" : isSheriffHumanAction(item.actionType, pending?.phase) ? " sheriff" : ""}" type="button" data-action-index="${index}">${escapeHtml(item.label)}</button>`).join("");
+      container.__actions = uniqueButtons;
       const draftAction = store.humanDraft?.action;
-      const currentDraftAction = draftAction && buttons.find((item) => humanActionKey(item) === humanActionKey(draftAction));
+      const currentDraftAction = draftAction && uniqueButtons.find((item) => humanActionKey(item) === humanActionKey(draftAction));
       if (currentDraftAction) {
         showHumanComposer(currentDraftAction, { focus: false, preserveContent: true });
       } else {
@@ -1054,9 +1311,60 @@
     }
   }
 
-  function actionLabel(value) {
-    const labels = { wolf_kill: "袭击", seer_check: "查验", witch_save: "使用解药", witch_poison: "使用毒药", speak: "发言", vote: "投票", hunter_shoot: "开枪", pass: "跳过" };
+  function actionLabel(value, phase = "") {
+    if (String(value) === "speak") {
+      const phaseKey = String(phase || "");
+      if (phaseKey === "sheriff_speech") return "警上发言";
+      if (phaseKey === "sheriff_pk_speech") return "警长竞选 PK 发言";
+      if (phaseKey === "day_pk_speech") return "放逐 PK 发言";
+    }
+    const labels = {
+      wolf_kill: "袭击", seer_check: "查验", witch_save: "使用解药", witch_poison: "使用毒药",
+      speak: "发言", vote: "投票", hunter_shoot: "开枪", pass: "弃权 / 不行动",
+      sheriff_run: "举手上警", sheriff_withdraw: "退水", sheriff_vote: "投警长票",
+      sheriff_order_clockwise: "顺时针发言", sheriff_order_counterclockwise: "逆时针发言",
+      sheriff_summarize: "警长总结并归票", sheriff_transfer: "移交警徽", sheriff_destroy: "撕毁警徽",
+    };
     return labels[String(value)] || String(value).replaceAll("_", " ");
+  }
+
+  function actionTargetPrefix(actionType, phase = "") {
+    if (String(actionType) === "speak") return "重点提及 ";
+    if (String(actionType) === "sheriff_summarize") return "归票 ";
+    if (String(actionType) === "sheriff_transfer") return "传给 ";
+    return "";
+  }
+
+  function isSheriffHumanAction(actionType, phase = "") {
+    return String(actionType).startsWith("sheriff_") || ["sheriff_speech", "sheriff_pk_speech"].includes(String(phase || ""));
+  }
+
+  function humanPrompt(pending, fallbackPhase) {
+    const phase = String(firstDefined(pending?.phase, fallbackPhase, ""));
+    const prompts = {
+      sheriff_run: "你是否举手竞选警长？",
+      sheriff_speech: "请完成警上竞选发言",
+      sheriff_withdraw: "你要继续竞选还是退水？",
+      sheriff_vote: "请投出警长选票，或选择弃权",
+      sheriff_pk_speech: "请完成警长竞选 PK 发言",
+      sheriff_pk_vote: "请投出警长 PK 选票，或选择弃权",
+      sheriff_badge: "请移交警徽或撕毁警徽",
+      sheriff_order: "请选择今天的发言方向",
+      day_discussion: "请完成本轮白天发言",
+      day_vote: "请投出放逐票",
+      day_pk_speech: "请完成放逐 PK 发言",
+      day_pk_vote: "请投出放逐 PK 票",
+      hunter_shot: "请选择猎枪目标，或放弃开枪",
+    };
+    return prompts[phase] || firstDefined(pending?.prompt, "轮到你行动");
+  }
+
+  function passLabel(phase) {
+    const key = String(phase || "");
+    if (key === "sheriff_run") return "不上警";
+    if (key === "sheriff_withdraw") return "继续竞选";
+    if (["sheriff_vote", "sheriff_pk_vote"].includes(key)) return "弃权（警长票）";
+    return "弃权 / 不行动";
   }
 
   function humanActionKey(action) {
@@ -1069,17 +1377,18 @@
     const content = preserveContent && sameAction ? previous.content : "";
     store.humanDraft = { action, content };
 
-    const isSpeech = String(action.actionType) === "speak";
+    const isSpeech = ["speak", "sheriff_summarize"].includes(String(action.actionType));
     const composer = $("#human-composer");
     const textarea = $("#human-content");
     $("#human-actions").hidden = true;
     composer.hidden = false;
-    $("#human-content-label").textContent = isSpeech ? "组织你的公开发言" : `补充「${actionLabel(action.actionType)}」内容`;
-    $("#submit-human-content").textContent = isSpeech ? "提交发言" : "提交行动";
-    $("#human-content-hint").textContent = action.description || (isSpeech
+    const isSummary = String(action.actionType) === "sheriff_summarize";
+    $("#human-content-label").textContent = isSummary ? "完成警长总结与归票发言" : isSpeech ? "组织你的公开发言" : `补充「${actionLabel(action.actionType, store.game?.pendingAction?.phase)}」内容`;
+    $("#submit-human-content").textContent = isSummary ? "提交归票" : isSpeech ? "提交发言" : "提交行动";
+    $("#human-content-hint").textContent = isSpeech
       ? "发言会进入公共频道。Ctrl / ⌘ + Enter 快速提交，Esc 取消。"
-      : "内容会随本次行动一起提交。Ctrl / ⌘ + Enter 快速提交，Esc 取消。");
-    textarea.placeholder = isSpeech ? "陈述你的判断、质疑或身份信息…" : "输入本次行动所需的补充内容…";
+      : "内容会随本次行动一起提交。Ctrl / ⌘ + Enter 快速提交，Esc 取消。";
+    textarea.placeholder = isSummary ? "总结场上信息，并说明你的放逐建议…" : isSpeech ? "陈述你的判断、质疑或身份信息…" : "输入本次行动所需的补充内容…";
     if (textarea.value !== content) textarea.value = content;
     updateHumanComposer();
     if (focus) requestAnimationFrame(() => textarea.focus());
@@ -1161,6 +1470,8 @@
       winner: game.winner,
       round: game.round,
       players: game.players.length,
+      playerStates: cloneProjection(game.players, []),
+      sheriff: cloneProjection(game.sheriff, null),
       eventCount: store.events.length,
       score: Number($("#overall-score").textContent) || null,
       timestamp: new Date().toISOString(),
@@ -1190,10 +1501,31 @@
     $$(".replay-card").forEach((card) => card.classList.toggle("active", card.dataset.replayId === String(id)));
     const evaluation = item.evaluation || {};
     const points = firstDefined(evaluation.turning_points, evaluation.replay?.key_turning_points, []);
-    const fallback = item.events.filter((event) => ["vote", "death", "game_over", "wolf_kill", "hunter_shoot"].some((key) => event.type.includes(key))).slice(-6).map((event) => ({ seq: event.seq, summary: event.message, impact: event.type }));
-    const rows = Array.isArray(points) && points.length ? points : fallback;
+    const fallback = item.events.filter((event) => ["vote", "death", "game_over", "wolf_kill", "hunter_shoot", "day_pk"].some((key) => event.type.includes(key))).slice(-8).map((event) => ({ seq: event.seq, summary: event.message, impact: event.type }));
+    const sheriffTypes = new Set(["sheriff_election_started", "sheriff_elected", "sheriff_election_void", "sheriff_order", "sheriff_summary", "badge_transferred", "badge_destroyed", "day_pk_started"]);
+    const sheriffChain = item.events.filter((event) => sheriffTypes.has(event.type)).map((event) => ({ seq: event.seq, title: eventInfo(event.type).label, summary: event.message, category: event.type }));
+    const baseRows = Array.isArray(points) && points.length ? points : fallback;
+    const rows = [...baseRows, ...sheriffChain]
+      .filter((item, index, values) => values.findIndex((candidate) => String(candidate.seq) === String(item.seq) && firstDefined(candidate.category, candidate.event_type, candidate.impact) === firstDefined(item.category, item.event_type, item.impact)) === index)
+      .sort((a, b) => Number(a.seq || 0) - Number(b.seq || 0))
+      .slice(-18);
     $("#attribution-content").className = "attribution-view";
-    $("#attribution-content").innerHTML = rows.length ? rows.map((point, index) => `<article class="trace-event"><i>${index + 1}</i><strong>${escapeHtml(firstDefined(point.title, point.type, `关键事件 #${point.seq || index + 1}`))}</strong><p>${escapeHtml(firstDefined(point.summary, point.description, point.reason, "该事件改变了后续决策空间。"))}</p></article>`).join("") : `<div class="empty-state"><span class="empty-glyph">◇</span><strong>暂无可识别的转折点</strong><p>事件信息不足，仍可通过导出的结构化日志人工复核。</p></div>`;
+    const sheriffSummary = replaySheriffSummary(evaluation, item);
+    $("#attribution-content").innerHTML = `${sheriffSummary}${rows.length ? rows.map((point, index) => `<article class="trace-event ${String(firstDefined(point.category, point.event_type, "")).includes("sheriff") || String(firstDefined(point.category, point.event_type, "")).includes("badge") ? "sheriff" : ""}"><i>${index + 1}</i><strong>${escapeHtml(firstDefined(point.title, point.type, point.category, `关键事件 #${point.seq || index + 1}`))}</strong><p>${escapeHtml(firstDefined(point.summary, point.description, point.reason, "该事件改变了后续决策空间。"))}</p></article>`).join("") : `<div class="empty-state"><span class="empty-glyph">◇</span><strong>暂无可识别的转折点</strong><p>事件信息不足，仍可通过导出的结构化日志人工复核。</p></div>`}`;
+  }
+
+  function replaySheriffSummary(evaluation, item) {
+    const sheriff = firstDefined(evaluation?.process_metrics?.sheriff, evaluation?.sheriff_metrics);
+    if (!sheriff || typeof sheriff !== "object") return "";
+    const election = sheriff.election || {};
+    const leadership = sheriff.leadership || {};
+    const flow = sheriff.badge_flow || {};
+    const players = Array.isArray(item.playerStates) ? item.playerStates : [];
+    const replayName = (playerId) => players.find((player) => String(player.id) === String(playerId))?.name || playerId || "—";
+    const holder = election.winner_id ? replayName(election.winner_id) : election.void ? "竞选流局" : "未产生";
+    const response = percent(leadership.nomination_response_rate);
+    const flowRate = percent(flow.execution_rate);
+    return `<section class="replay-sheriff-summary"><div><span>♛</span><strong>警长链路</strong></div><p>首任：${escapeHtml(holder)} · 归票响应：${response === null ? "—" : `${Math.round(response)}%`} · 关键 1.5 票：${escapeHtml(firstDefined(leadership.decisive_weighted_vote_count, 0))} · 警徽流：${flowRate === null ? "—" : `${Math.round(flowRate)}%`}</p></section>`;
   }
 
   function formatDate(value) {
@@ -1266,7 +1598,7 @@
       if (!projectedGame) throw new Error("后端没有返回可导出的当前视角状态");
       const projectedEvents = extractEvents(eventPayload).map(normalizeEvent);
       const payload = {
-        schema_version: "1.0",
+        schema_version: "1.1",
         exported_at: new Date().toISOString(),
         perspective,
         game: projectedGame,

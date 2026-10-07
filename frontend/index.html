@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#090b12" />
     <meta name="description" content="多智能体狼人杀实时观战与复盘控制台" />
     <title>NOCTURNE · 狼人杀 Agent Arena</title>
-    <link rel="stylesheet" href="./styles.css?v=20261003-2" />
+    <link rel="stylesheet" href="./styles.css?v=20261006-sheriff-1" />
   </head>
   <body>
     <div class="ambient ambient-one" aria-hidden="true"></div>
@@ -109,11 +109,13 @@
             <div class="phase-line"></div>
             <div class="phase-node" data-phase="night"><i>2</i><span>夜间行动</span></div>
             <div class="phase-line"></div>
-            <div class="phase-node" data-phase="day"><i>3</i><span>公布结果</span></div>
+            <div class="phase-node" data-phase="sheriff"><i>3</i><span>警长竞选</span></div>
             <div class="phase-line"></div>
-            <div class="phase-node" data-phase="discussion"><i>4</i><span>自由发言</span></div>
+            <div class="phase-node" data-phase="dawn"><i>4</i><span>公布结果</span></div>
             <div class="phase-line"></div>
-            <div class="phase-node" data-phase="vote"><i>5</i><span>放逐投票</span></div>
+            <div class="phase-node" data-phase="discussion"><i>5</i><span>白天发言</span></div>
+            <div class="phase-line"></div>
+            <div class="phase-node" data-phase="vote"><i>6</i><span>放逐投票</span></div>
           </div>
 
           <div class="arena-layout">
@@ -139,6 +141,7 @@
                     <span id="center-kicker">WAITING</span>
                     <strong id="center-title">等待开局</strong>
                     <small id="center-hint">No active match</small>
+                    <div class="center-sheriff" id="center-sheriff" hidden></div>
                   </div>
                 </div>
               </div>
@@ -177,6 +180,7 @@
                 <button data-event-filter="speech" type="button">发言</button>
                 <button data-event-filter="action" type="button">行动</button>
                 <button data-event-filter="vote" type="button">投票</button>
+                <button data-event-filter="sheriff" type="button">警长</button>
               </div>
               <div class="event-stream" id="event-stream" aria-live="polite">
                 <div class="empty-state compact-empty">
@@ -252,6 +256,7 @@
                 <span>关键节点</span>
                 <p>对局开始后，将基于事件序列识别局势转折。</p>
               </div>
+              <div class="sheriff-metric-card" id="sheriff-metric-card" hidden></div>
             </section>
           </div>
         </section>
@@ -317,8 +322,13 @@
           <label><span class="form-label">玩家人数</span><select name="player_count"><option value="6">6 人 · 快速局</option><option value="8" selected>8 人 · 标准局</option><option value="9">9 人 · 经典局</option><option value="12">12 人 · 完整局</option></select></label>
           <label><span class="form-label">随机种子</span><input name="seed" type="number" min="0" placeholder="自动生成" /></label>
           <label><span class="form-label">Agent 策略</span><select name="strategy" id="strategy-select"><option value="heuristic">Heuristic · 本地启发式</option><option value="mixed" disabled>Mixed · 需注入策略工厂</option><option value="deepseek" id="deepseek-option" disabled>DeepSeek · 等待服务器配置</option></select></label>
-          <label><span class="form-label">平票规则</span><select name="tie_rule"><option value="no_elimination">无人出局</option><option value="random">随机出局</option></select></label>
+          <label title="启用警长规则时固定使用放逐 PK；此设置仅在关闭警长规则后生效。"><span class="form-label">旧版平票规则（无警长模式）</span><select name="tie_rule"><option value="no_elimination">无人出局</option><option value="random">随机出局</option></select></label>
         </div>
+        <label class="rule-toggle">
+          <input name="enable_sheriff" type="checkbox" checked />
+          <span class="rule-toggle-switch" aria-hidden="true"></span>
+          <span><strong>启用警长规则</strong><small>首日竞选、1.5 票、归票、警徽移交与放逐 PK</small></span>
+        </label>
         <div class="human-config" id="human-config" hidden>
           <label><span class="form-label">你的昵称</span><input name="human_name" maxlength="16" value="观察员 01" /></label>
           <label><span class="form-label">偏好座位</span><select name="human_seat"><option value="random">随机分配</option><option value="1">1 号位</option><option value="2">2 号位</option><option value="3">3 号位</option><option value="4">4 号位</option></select></label>
@@ -341,6 +351,6 @@
     <div class="toast-region" id="toast-region" aria-live="assertive"></div>
     <div class="mobile-scrim" id="mobile-scrim"></div>
 
-    <script src="./app.js?v=20261003-3" defer></script>
+    <script src="./app.js?v=20261006-sheriff-1" defer></script>
   </body>
 </html>
