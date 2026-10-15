@@ -2,7 +2,7 @@
 
 一个可直接运行的多智能体狼人杀研究与演示系统。每个 Agent 只接收按身份投影的私有 `Observation`，在独立目标和行动空间中完成推理、发言、技能与投票；规则引擎负责回合推进、非法动作修复、胜负裁决与事件溯源。项目同时提供实时观战 UI、人类座位接管、量化评测、中文复盘和多版本 Elo 榜单。
 
-本实现选择进阶方向 **2：测评 + 复盘**。
+本实现提供进阶方向 **2：测评 + 复盘**，并加入方向 **3：基于验证的策略自进化**。
 
 ## 一分钟启动
 
@@ -55,8 +55,44 @@ python run.py
 
 ## 核心用法
 
+### 跨局自进化
+
+创建对局时勾选“启用跨局自进化”（API：`enable_evolution: true`）。默认关闭，
+关闭时继续使用原有固定策略，不读写跨局经验。开启后按以下闭环执行：
+
+1. **复盘反馈**：仅在完局后，利用裁判真值统计各 AI 角色的胜负、误投、误毒/误枪与言票不一致；人类动作不计入 AI 错误。将结果转为角色通用中文经验，不复制旧局身份、座位或原话。
+2. **策略更新**：按失败反馈生成有界候选，调整女巫出毒阈值、猎人开枪阈值、预言家查验偏好、狼人信息角色威胁权重和公共嫌疑权重。候选不会立即替换正式版本。
+3. **改进验证**：每个候选至少使用 24 个独立验证 seed，分别运行旧版与候选版，固定规则、座位分配和其余角色版本。要求胜率差至少 +5 个百分点、角色贡献分下降不超过 0.02、无信息泄露/引擎动作修复、模型降级率不增加，并通过精确符号检验（同轮多候选校正）。不足或未达标保持旧版。
+4. **经验继承与再对局**：仅晋级版本落盘；下一局为每个座位创建全新记忆，注入该角色的策略参数和白名单经验。进行中的对局保持创建时的版本快照。模型与规则板型分别建库，本地验证结果不能冒充 DeepSeek 改进。
+
+这里进化的是**策略参数与提示词中的通用经验**，不是微调 DeepSeek 权重，也不让模型改写源代码。
+候选由确定性规则提出，复盘属于规则归因，不是自动发现任意新算法；验证通过表示本次实验有提升证据，不保证此后每局获胜。
+
+本地模式完局后自动在后台验证；DeepSeek 模式只自动记录反馈，不额外启动付费批量对局。
+可通过 [`/api/evolution`](http://127.0.0.1:8000/api/evolution) 查看后台状态、正式版本、候选参数、反馈快照和验证结果。
+重启后会继续使用 `data/evolution/strategies.json` 中已晋级的版本，该目录已忽略 Git 跟踪，文件不包含密钥。
+文件使用线程锁、跨进程文件锁和原子替换，锁冲突会明确报错，不会覆盖另一个进程的版本。
+
+独立运行两轮“对局—反馈—优化—验证—再对局”：
+
+```bash
+python -m backend.evaluation.evolution --seeds 5,42,31415 --rounds 2 --validation-games 24 --output data/evolution/report.json
+```
+
+训练种子与验证种子严格分开，验证结果不会回灌为训练反馈；报告保留候选版本、对手版本、成对结果、胜率差与统计检验结果。
+可以用 `--store <其他路径>` 隔离实验库，避免实验影响实时对局。`--validation-games` 小于 24 只用于调试，永远不会晋级。
+
+DeepSeek 批量实验必须显式确认费用（会产生大量模型调用，需先配置服务端环境变量）：
+
+```bash
+python -m backend.evaluation.evolution --deepseek --allow-paid-validation --seeds 5,42,31415 --rounds 1 --validation-games 24 --output data/evolution/deepseek-report.json
+```
+
+### 引擎接口
+
 ```python
-from backend import GameConfig, WerewolfGame
+from backend.game.models import GameConfig
+from backend.game.engine import WerewolfGame
 
 game = WerewolfGame(GameConfig(player_count=8, seed=42))
 final_state = game.run()
@@ -86,11 +122,11 @@ class MyAgent:
         ...
 ```
 
-`LLMAgent` 通过很小的 `LLMProvider.complete(messages, temperature=...)` 协议接入任意模型服务。模型输出越权、格式错误或异常时会降级为合法的启发式动作，保证对局不被单个 Agent 中断。
+五类角色通过 `BaseAgent` 共用很小的 `LLMProvider.complete(messages, temperature=...)` 协议接入任意模型服务。模型输出越权、格式错误或异常时会降级为合法的启发式动作，保证对局不被单个 Agent 中断。
 
 ## 五套独立角色 Agent
 
-`default_agent_factory(player_id, role)` 不再为所有身份创建同一个、再按角色分支的通用实现，而是直接实例化对应的具体角色类：
+`create_agent(player_id, role)` 不再为所有身份创建同一个、再按角色分支的通用实现，而是直接实例化对应的具体角色类：
 
 | 角色实现 | 独立目标 | 记忆与规划重点 |
 |---|---|---|
@@ -103,6 +139,11 @@ class MyAgent:
 每个实例都拥有自己的 `RoleGoal`、`RoleMemory` 和角色规划器，彼此不共享可变状态。`RoleMemory.strategy_state` 只保存该角色从合法视角得出的持续策略状态，例如预言家的警徽流计划或悍跳狼的一致假查验；不会引入其他角色私有事实。这里的“长期记忆”默认指**同一局内跨回合持续存在**：每次决策只从该玩家收到的 `Observation` 更新记忆，不读取 `GameState` 或其他玩家内存。记忆支持显式 `export()` / `restore()`，用于研究者自行实现跨局实验；跨局恢复时应按玩家、对局、角色和 Agent 版本分区，系统不会默认把上一局知识带入下一局。
 
 五类 Agent 均带角色专属 system prompt。未注入 Provider 时，提示词不会触发外部调用，决策由本地规划器完成；注入 Provider 后，该角色提示词会实际作为 system 消息发送，模型输出仍须通过合法动作校验。固定配置、随机种子和本地规划器可确定性复现；使用外部模型时，还需要 Provider 本身采用固定模型、固定参数并提供确定性保证，才能声称相同复现性。
+
+局内 Agent 的公开发言、警长竞选、PK 发言和归票统一使用简体中文，本地基线与
+DeepSeek 提示词采用相同语言要求。模型返回纯英文正文时，会使用该角色已经生成的
+中文本地基线；玩家名称、ID 和 JSON 字段/枚举值保留原格式。狼队夜票与技能反馈
+文案也使用中文，原有可见范围保持不变。已保存的历史对局和人类输入保留原文。
 
 角色目标、记忆快照、system prompt 和内部规划过程不会写入公共事件日志。日志只记录规则允许公开的发言、动作结果与状态变化；私有行动仍由原有可见范围和观察投影控制。
 
@@ -146,10 +187,29 @@ game.run()
 | `GET` | `/api/replays` | 对局列表 |
 | `GET` | `/api/leaderboard` | 当前服务实例榜单 |
 
+网页默认使用 HTTP 状态同步，`/api/health` 的 `transport` 字段声明
+`http_polling` 和默认 2200 毫秒的同步间隔。状态接口会在同一把锁内返回状态与
+可见事件，前端每轮只请求一次快照；请求完成后才安排下一轮，终局后停止轮询。
+各区域仅在其展示数据变化时更新，座位、日志和发言条目按稳定 ID 复用。只有读者
+原本在列表底部时才跟随新条目，阅读历史时保留位置；切换视角会清除上一视角内容。
+
+浏览器回归测试覆盖重复快照、节点复用、滚动锚点、人类发言草稿和视角隔离。
+在已安装 Playwright 且可使用 Microsoft Edge 的 Node 环境中执行：
+
+```bash
+node tests/frontend_sync.spec.cjs
+node tests/frontend_backend.spec.cjs
+```
+
+第二项测试启动随机端口的独立后端，在桌面和移动布局下完成纯 AI／人机混战，
+检查警长、玩家视角、真人操作与完局复盘；回放只写临时目录，不调用真实模型。
+其他 Chromium 通道可通过 `PLAYWRIGHT_CHANNEL` 指定，后端测试可用 `PYTHON`
+指定 Python 可执行文件。
+
 ## 批量竞技与榜单
 
 ```bash
-python -m backend.tournament \
+python -m backend.evaluation.tournament \
   --seeds 1,2,5-8 \
   --games-per-seed 2 \
   --player-count 8 \
@@ -161,7 +221,7 @@ python -m backend.tournament \
 Python API：
 
 ```python
-from backend.tournament import run_tournament
+from backend.evaluation.tournament import run_tournament
 
 report = run_tournament(
     seeds=[1, 2, 3],
@@ -174,16 +234,48 @@ print(report["leaderboard"])
 
 报告包含 `games`、`evaluations`、`leaderboard`、`summaries` 和 `failures`。Elo 以阵营间成对结果做零和更新，并保留角色维度胜率，降低身份分配造成的偏差。
 
+评测只服务本项目：单局入口为 `evaluate_game(events, final_players, winner)`，
+也可直接传入保存的回放对象；榜单入口为 `EloLeaderboard` 和
+`build_leaderboard()`。兼容本项目无警长字段的历史回放，不再猜测外部日志字段、
+事件名称或游戏引擎接口。单局 Schema 1.1、竞技报告 Schema 1.0 和现有展示字段
+保持不变。
+
+自定义参赛 Agent 统一使用 `factory(player_id, role)`，每次返回独立的
+`decide(observation, rng)` 实例；不再接受零参数／单参数工厂或 Agent 原型对象。
+测试注入的游戏工厂必须接受 `config, agent_factory=...`，返回支持
+`run(max_steps=...)`、`result()`、`event_log(omniscient=True)` 的对象。
+
 ## 项目结构
 
 ```text
 backend/
-  models.py       领域模型与配置
-  agents.py       五类角色 Agent、目标/记忆/规划器与 LLM Provider 协议
-  engine.py       信息隔离的对局状态机
-  evaluation.py   指标、复盘归因与 Elo
-  tournament.py   批量竞技与 CLI
-  server.py       零依赖 HTTP/静态服务
+  agents/
+    base.py       BaseAgent：视角/记忆/上下文/模型输出校验与降级
+    memory.py     独立角色目标、长期记忆、容量裁剪与恢复
+    planner.py    公开证据评分、目标选择及发言/投票/警长规划
+    factory.py    唯一 create_agent 入口、角色注册与 Provider 注入
+    werewolf.py   狼人 Agent 与狼人专属 Planner
+    seer.py       预言家 Agent 与查验/警徽流 Planner
+    witch.py      女巫 Agent 与药剂 Planner
+    villager.py   村民 Agent 与公开推理 Planner
+    hunter.py     猎人 Agent 与开枪 Planner
+  llm/
+    base.py       通用 LLMProvider 协议
+    provider.py   DeepSeek 请求、重试、脱敏与环境配置
+  game/
+    models.py     角色、阶段、动作、观察、配置等领域契约
+    engine.py     信息隔离、警长规则及完整对局状态机
+  logger/
+    events.py     事件写入、可见性过滤和安全序号投影
+    storage.py    回放 JSON 原子落盘
+  evaluation/
+    common.py     本项目日志契约、一次性事件索引与共享统计
+    metrics.py    信息隔离、言票一致性、协同；竞选/领导力/警徽流分步评测
+    replay.py     转折点与中文复盘归因
+    evaluator.py  Schema 1.1 单局评测入口
+    leaderboard.py Elo 和角色维度排行榜
+    tournament.py 批量竞技与 CLI
+  server.py       HTTP/静态服务，保留在 backend 根目录
 frontend/
   index.html      观战控制台结构
   styles.css      响应式视觉系统
@@ -193,6 +285,30 @@ docs/ARCHITECTURE.md
 ```
 
 更详细的信任边界、状态机、事件模型和扩展方式见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+
+五类角色均继承 `backend.agents.base.BaseAgent`，对外统一调用
+`decide(observation, rng)`。基类内部负责 `update_state()`、上下文构造、
+本地规划、模型输出解析与校验、降级和最终动作记录；每次决策只摄取一次记忆、
+记录一次最终动作。公共策略算法放在 `RolePlanner`，各角色继续拥有独立目标、
+记忆、专属提示词和规划器。
+
+旧兼容入口、`RoleAgent` 别名和通用旧 Agent 已移除，请使用明确的职责模块：
+
+```python
+from functools import partial
+from backend.agents.factory import create_agent
+from backend.llm.provider import DeepSeekProvider
+
+provider = DeepSeekProvider.from_env()
+game = WerewolfGame(
+    GameConfig(seed=42),
+    agent_factory=partial(create_agent, provider=provider),
+)
+```
+
+未注入 Provider 时使用本地规划；共享 Provider 不共享任何座位的记忆。
+批量竞技入口为 `python -m backend.evaluation.tournament`。
+已有 HTTP 接口、回放格式和记忆快照保持兼容。
 
 ## 研究扩展建议
 

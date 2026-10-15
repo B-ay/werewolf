@@ -1,6 +1,13 @@
 (() => {
   "use strict";
 
+  /*
+   * 前端只负责“安全投影的展示与人类动作提交”，不保存裁判真实状态，也不直接
+   * 调用 DeepSeek。完整数据流是：后端状态/增量事件 -> normalize* 兼容字段 ->
+   * store 合并 -> renderAll 统一渲染。切换 public/player/observer 视角时会清空旧
+   * 事件再向后端请求，避免上一视角的私有内容残留在页面内存中。
+   */
+
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
@@ -9,6 +16,8 @@
   const HISTORY_KEY = "nocturne.match-history.v1";
   const MAX_EVENTS = 500;
 
+  // 展示元数据与引擎枚举解耦：后端保持稳定协议，中文名称、图标和阶段文案可在
+  // 此处独立调整。别名用于兼容旧回放，而不是放宽后端的动作校验。
   const ROLE_META = {
     werewolf: { name: "狼人", icon: "♞", team: "wolf" },
     wolf: { name: "狼人", icon: "♞", team: "wolf" },
@@ -108,6 +117,8 @@
     day_pk_speech: { icon: "“", label: "放逐 PK 发言", category: "speech" },
   };
 
+  // 单一页面状态仓库。game 是当前视角的最新快照，events 是按 seq 去重后的事件
+  // 窗口；任何渲染函数都只读 store，不自行发请求或修改裁判状态。
   const store = {
     game: null,
     events: [],
@@ -115,9 +126,12 @@
     eventFilter: "all",
     overlay: "identity",
     perspective: "observer",
-    socket: null,
-    reconnectTimer: null,
     pollTimer: null,
+    pollGameId: null,
+    pollGeneration: 0,
+    pollInterval: 2200,
+    stateRequest: null,
+    snapshotRevision: 0,
     auto: false,
     runController: null,
     sound: false,
@@ -130,6 +144,66 @@
     leaderboard: null,
     providers: {},
   };
+
+  // 缓存每个展示区域实际依赖的数据。更新时间戳等不参与展示的字段不会触发重绘。
+  const renderedRegions = new Map();
+
+  function renderChanged(region, data, render) {
+    const signature = JSON.stringify([store.viewRevision, store.game?.id, data]);
+    if (renderedRegions.get(region) === signature) return;
+    render();
+    renderedRegions.set(region, signature);
+  }
+
+  function setHtmlIfChanged(element, html) {
+    if (element.__renderHtml === html) return;
+    element.innerHTML = html;
+    element.__renderHtml = html;
+  }
+
+  // 按稳定 key 复用列表节点；仅新条目播放入场动画。阅读历史时以可见条目为锚，
+  // 即使窗口淘汰了前面的旧条目，也尽量保持原来阅读的内容和位置。
+  function reconcileRows(container, rows) {
+    const scrollTop = container.scrollTop;
+    const followBottom = container.scrollHeight - container.clientHeight - scrollTop <= 40;
+    const top = container.getBoundingClientRect().top;
+    const anchor = [...container.children].find((node) => node.dataset.renderKey && node.getBoundingClientRect().bottom > top);
+    const anchorTop = anchor?.getBoundingClientRect().top;
+    const existing = new Map([...container.children].map((node) => [node.dataset.renderKey, node]));
+    const wanted = new Set(rows.map((row) => row.key));
+    for (const node of [...container.children]) {
+      // 删除空状态或已超出窗口的旧条目，保留其他节点。
+      if (!wanted.has(node.dataset.renderKey)) node.remove();
+    }
+    let cursor = container.firstElementChild;
+    for (const row of rows) {
+      let node = existing.get(row.key);
+      if (!node || node.__renderHtml !== row.html) {
+        const template = document.createElement("template");
+        template.innerHTML = row.html;
+        const next = template.content.firstElementChild;
+        if (!node) {
+          node = next;
+        } else {
+          node.className = next.className;
+          node.innerHTML = next.innerHTML;
+        }
+        node.dataset.renderKey = row.key;
+        node.__renderHtml = row.html;
+      }
+      if (node !== cursor) container.insertBefore(node, cursor);
+      cursor = node.nextElementSibling;
+    }
+    if (followBottom) {
+      container.scrollTop = container.scrollHeight;
+    } else if (anchor?.isConnected) {
+      // 浏览器可能已经执行原生滚动锚定；以当前 scrollTop 为基准补齐剩余偏移，
+      // 避免头部条目删除后把浏览器已校正的位置再还原成旧的数值。
+      container.scrollTop += anchor.getBoundingClientRect().top - anchorTop;
+    } else {
+      container.scrollTop = scrollTop;
+    }
+  }
 
   function readHistory() {
     try {
@@ -193,6 +267,8 @@
     return ROLE_META[String(role || "").toLowerCase()]?.team || "unknown";
   }
 
+  // normalize* 是后端契约与 DOM 之间的防腐层：既接受 Schema 1.1 字段，也兼容
+  // 旧回放别名，最终向渲染层提供形状稳定的对象。
   function normalizePlayer(player, index) {
     const roleValue = firstDefined(player.role, player.identity, player.known_role, player.character);
     const role = roleValue ? String(roleValue).toLowerCase() : null;
@@ -428,8 +504,11 @@
       store.eventKeys.clear();
     }
     let added = 0;
+    const retainedFloor = replace ? 0 : Number(store.events[0]?.seq ?? 0);
     normalized.forEach((event) => {
       const key = eventKey(event);
+      // HTTP 快照会包含完整历史；超过本地窗口而被淘汰的旧事件无需再次加入。
+      if (retainedFloor && Number(event.seq) < retainedFloor) return;
       if (!store.eventKeys.has(key)) {
         store.eventKeys.add(key);
         store.events.push(event);
@@ -454,23 +533,25 @@
   function applyPayload(payload, { replaceEvents = false } = {}) {
     if (!payload) return;
     const events = extractEvents(payload);
-    if (events.length) mergeEvents(events, { replace: replaceEvents });
-    if (payload.event && typeof payload.event === "object") mergeEvents([payload.event]);
     const nextGame = normalizeGame(payload);
+    const changedGame = nextGame && store.game?.id && store.game.id !== nextGame.id;
+    if (changedGame) {
+      store.resultShownFor = null;
+      stopPolling();
+    }
+    if (events.length || replaceEvents || changedGame) mergeEvents(events, { replace: replaceEvents || Boolean(changedGame) });
+    if (payload.event && typeof payload.event === "object") mergeEvents([payload.event]);
     if (nextGame) {
-      const previousId = store.game?.id;
-      if (previousId && previousId !== nextGame.id) {
-        store.events = [];
-        store.eventKeys.clear();
-        mergeEvents(events, { replace: true });
-        store.resultShownFor = null;
-      }
+      store.snapshotRevision += 1;
       store.game = nextGame;
       store.auto = nextGame.running && !isFinished(nextGame);
     }
     renderAll();
+    if (store.game && isFinished(store.game)) stopPolling();
   }
 
+  // 所有 HTTP 请求统一经过这里，集中设置 JSON 头、解析错误并阻止调用点各自
+  // 拼接不一致的异常处理。API Key 从不进入浏览器请求或 localStorage。
   async function request(path, options = {}) {
     const timeout = options.timeout ?? 9000;
     const controller = options.signal ? null : new AbortController();
@@ -495,6 +576,9 @@
   }
 
   function applyProviderCapabilities(payload = {}) {
+    // 当前服务器只提供 HTTP 快照；旧服务器未声明能力时也按此方式同步。
+    const interval = Number(payload?.transport?.poll_interval_ms);
+    store.pollInterval = Number.isFinite(interval) ? Math.max(1000, Math.min(30000, interval)) : 2200;
     const capability = payload?.providers?.deepseek || {};
     const configured = capability.configured === true;
     const model = String(capability.model || "deepseek-flash");
@@ -547,107 +631,71 @@
 
   async function loadState({ quiet = false } = {}) {
     const revision = store.viewRevision;
+    const path = statePath();
+    const key = `${revision}:${path}`;
+    if (store.stateRequest?.key === key) return store.stateRequest.promise;
+    const snapshotRevision = store.snapshotRevision;
     if (!quiet) setConnection("connecting", "正在连接", "检查对局服务…");
-    try {
-      const data = await request(statePath());
-      if (revision !== store.viewRevision) return null;
-      applyPayload(data, { replaceEvents: !store.events.length });
-      setConnection("connected", "服务已连接", store.socket?.readyState === WebSocket.OPEN ? "WebSocket 实时流" : "HTTP 状态同步");
-      if (store.game?.id) {
-        connectSocket(store.game.id);
+    const pending = { key, promise: null };
+    pending.promise = (async () => {
+      try {
+        const data = await request(path);
+        // 若视角已切换，或单步/人类动作已返回更新快照，丢弃这份较早发出的响应。
+        if (revision !== store.viewRevision || snapshotRevision !== store.snapshotRevision) return null;
+        applyPayload(data, { replaceEvents: !store.events.length });
+        setConnection("connected", "服务已连接", "HTTP 状态同步");
         startPolling();
+        return data;
+      } catch (error) {
+        if (revision === store.viewRevision) {
+          setConnection("error", "服务未连接", API_BASE || "当前来源");
+          if (!quiet) toast("无法连接对局服务", humanizeError(error), "error");
+        }
+        throw error;
+      } finally {
+        if (store.stateRequest === pending) store.stateRequest = null;
       }
-      return data;
-    } catch (error) {
-      if (!quiet) {
-        setConnection("error", "服务未连接", API_BASE || "当前来源");
-        toast("无法连接对局服务", humanizeError(error), "error");
-      }
-      throw error;
-    }
+    })();
+    store.stateRequest = pending;
+    return pending.promise;
   }
 
   function setConnection(kind, label, detail) {
     store.connection = kind;
     const indicator = $("#connection-indicator");
-    indicator.className = `connection-indicator ${kind}`;
-    $("#connection-label").textContent = label;
-    $("#connection-detail").textContent = detail;
+    const className = `connection-indicator ${kind}`;
+    if (indicator.className !== className) indicator.className = className;
+    if ($("#connection-label").textContent !== label) $("#connection-label").textContent = label;
+    if ($("#connection-detail").textContent !== detail) $("#connection-detail").textContent = detail;
   }
 
-  function connectSocket(gameId) {
-    if (!gameId || typeof WebSocket === "undefined") return;
-    if (store.socket && store.socket.__gameId === gameId && [WebSocket.OPEN, WebSocket.CONNECTING].includes(store.socket.readyState)) return;
-    closeSocket();
-    const base = API_BASE || window.location.origin;
-    let url;
-    try {
-      const parsed = new URL(base);
-      parsed.protocol = parsed.protocol === "https:" ? "wss:" : "ws:";
-      parsed.pathname = `/ws/${encodeURIComponent(gameId)}`;
-      const socketParams = new URLSearchParams();
-      appendPerspective(socketParams);
-      parsed.search = socketParams.toString();
-      url = parsed.toString();
-    } catch {
-      return;
-    }
-    try {
-      const revision = store.viewRevision;
-      const socket = new WebSocket(url);
-      socket.__gameId = gameId;
-      store.socket = socket;
-      socket.addEventListener("open", () => setConnection("connected", "实时流已连接", `对局 ${shortId(gameId)}`));
-      socket.addEventListener("message", (message) => {
-        if (revision !== store.viewRevision) return;
-        try {
-          const data = JSON.parse(message.data);
-          applyPayload(data);
-        } catch {
-          // Malformed socket messages are ignored without breaking polling.
-        }
-      });
-      socket.addEventListener("close", () => {
-        if (store.socket !== socket) return;
-        setConnection("connected", "服务已连接", "实时流中断，已切换轮询");
-        if (store.game?.id === gameId && !isFinished(store.game)) {
-          clearTimeout(store.reconnectTimer);
-          store.reconnectTimer = window.setTimeout(() => connectSocket(gameId), 3500);
-        }
-      });
-      socket.addEventListener("error", () => socket.close());
-    } catch {
-      setConnection("connected", "服务已连接", "使用 HTTP 轮询");
-    }
-  }
-
-  function closeSocket() {
-    clearTimeout(store.reconnectTimer);
-    if (store.socket) {
-      store.socket.onclose = null;
-      store.socket.close();
-      store.socket = null;
-    }
+  function stopPolling() {
+    clearTimeout(store.pollTimer);
+    store.pollTimer = null;
+    store.pollGameId = null;
+    store.pollGeneration += 1;
   }
 
   function startPolling() {
-    clearInterval(store.pollTimer);
-    if (!store.game?.id) return;
-    store.pollTimer = window.setInterval(async () => {
-      const revision = store.viewRevision;
-      const id = store.game?.id;
-      if (!id || document.hidden) return;
+    const id = store.game?.id;
+    if (!id || isFinished(store.game)) { stopPolling(); return; }
+    if (store.pollGameId === id) return;
+    stopPolling();
+    store.pollGameId = id;
+    const generation = store.pollGeneration;
+    const tick = async () => {
+      if (generation !== store.pollGeneration) return;
       try {
-        const after = store.events.at(-1)?.seq ?? 0;
-        const data = await request(eventsPath(id, after), { timeout: 5000 });
-        if (revision !== store.viewRevision) return;
-        const added = mergeEvents(extractEvents(data).length ? extractEvents(data) : Array.isArray(data) ? data : []);
-        if (added) renderAll();
-        if (store.socket?.readyState !== WebSocket.OPEN || store.auto) await loadState({ quiet: true });
+        // 状态接口在同一把锁内返回快照与可见事件，一次响应即可一致更新各区域。
+        if (!document.hidden) await loadState({ quiet: true });
       } catch {
-        if (store.socket?.readyState !== WebSocket.OPEN) setConnection("error", "连接不稳定", "正在自动重试");
+        // loadState 已更新连接提示；下一轮继续重试。
+      } finally {
+        // 上次请求完成后才安排下次，慢模型响应不会堆叠轮询或复活旧对局定时器。
+        if (generation === store.pollGeneration) store.pollTimer = window.setTimeout(tick, store.pollInterval);
       }
-    }, 2200);
+    };
+    store.pollTimer = window.setTimeout(tick, store.pollInterval);
   }
 
   async function createGame(form) {
@@ -668,6 +716,7 @@
       strategy: values.get("strategy"),
       vote_tie_policy: tieRule,
       enable_sheriff: values.get("enable_sheriff") === "on",
+      enable_evolution: values.get("enable_evolution") === "on",
       human_player: mode === "mixed" ? humanSeat : null,
       human_players: mode === "mixed" ? [humanSeat] : [],
     };
@@ -704,7 +753,6 @@
       closeModal($("#create-dialog"));
       navigate("arena");
       if (store.game?.id) {
-        connectSocket(store.game.id);
         startPolling();
       }
       setConnection("connected", "服务已连接", store.game ? `对局 ${shortId(store.game.id)}` : "新对局已创建");
@@ -732,7 +780,6 @@
       const data = await request(`/api/games/${encodeURIComponent(gameId)}/step`, { method: "POST", body: JSON.stringify(body), timeout: 20000 });
       if (revision !== store.viewRevision || store.game?.id !== gameId) return;
       applyPayload(data);
-      await pollEvents({ quiet: true });
     } catch (error) {
       if (revision !== store.viewRevision || store.game?.id !== gameId) return;
       toast("推进失败", humanizeError(error), "error");
@@ -783,7 +830,7 @@
       });
       if (revision !== store.viewRevision || store.game?.id !== gameId) return;
       applyPayload(data);
-      await pollEvents({ quiet: true });
+      startPolling();
     } catch (error) {
       if (revision !== store.viewRevision || store.game?.id !== gameId) return;
       if (error.name !== "AbortError") {
@@ -798,13 +845,7 @@
 
   async function pollEvents({ quiet = false } = {}) {
     if (!store.game?.id) return;
-    const revision = store.viewRevision;
     try {
-      const after = store.events.at(-1)?.seq ?? 0;
-      const data = await request(eventsPath(store.game.id, after));
-      if (revision !== store.viewRevision) return;
-      const events = extractEvents(data).length ? extractEvents(data) : Array.isArray(data) ? data : [];
-      if (mergeEvents(events)) renderAll();
       await loadState({ quiet: true });
     } catch (error) {
       if (!quiet) toast("事件同步失败", humanizeError(error), "error");
@@ -966,17 +1007,30 @@
     return labels[String(cause)] || String(cause);
   }
 
+  // 每个区域只比较自己实际使用的数据，时间戳变化或重复响应不会触碰 DOM。
+  // 所有区域仍从同一份快照取值，并以视角修订号隔离旧的私有内容。
   function renderAll() {
-    renderHeader();
-    renderPhaseTrack();
-    renderSeats();
-    renderEvents();
-    renderConversations();
-    renderMetrics();
-    renderHumanTurn();
-    renderControls();
-    renderMiniGame();
-    renderReplayList();
+    const game = store.game;
+    const players = game?.players || [];
+    const names = players.map(({ id, name, seat }) => ({ id, name, seat }));
+    const phase = game?.phase;
+    const round = game?.round;
+    const status = game?.status;
+    const winner = game?.winner;
+    const sheriff = game?.sheriff;
+    const speeches = store.events.filter(isTranscriptEvent);
+    const lastEvent = store.events.at(-1);
+    const pkEvent = [...store.events].reverse().find((event) => event.type === "day_pk_started" && Number(event.round) === Number(round));
+    renderChanged("header", [phase, round, status, winner, names, players.map((p) => p.alive), sheriff, store.perspective], renderHeader);
+    renderChanged("phase", [phase, sheriff?.enabled], renderPhaseTrack);
+    renderChanged("seats", [players, phase, sheriff, store.overlay, lastEvent?.target, speeches.at(-1)?.actor, pkEvent], renderSeats);
+    renderChanged("events", [store.events, store.eventFilter, names], renderEvents);
+    renderChanged("conversations", [speeches, players.map(({ id, name, role }) => ({ id, name, role }))], renderConversations);
+    renderChanged("metrics", [game?.evaluation, game?.turningPoints, game?.model, game?.config?.strategy, players.map(({ id, name, model }) => ({ id, name, model }))], renderMetrics);
+    renderChanged("human", [game?.pendingAction, phase, round, status, store.perspective, names, players.map((p) => p.controller)], renderHumanTurn);
+    renderChanged("controls", [phase, status, winner, game?.running, game?.pendingAction, store.auto], renderControls);
+    renderChanged("mini", [phase, round, status, winner, game?.mode, players.length, players.map((p) => p.alive)], renderMiniGame);
+    renderChanged("replays", store.history, renderReplayList);
     maybeShowResult();
   }
 
@@ -1054,8 +1108,10 @@
 
   function renderSeats() {
     const ring = $("#seat-ring");
-    $$(".player-seat", ring).forEach((node) => node.remove());
     const players = store.game?.players || [];
+    const existing = new Map($$(".player-seat", ring).map((node) => [node.dataset.playerId, node]));
+    const wanted = new Set(players.map((player) => player.id));
+    existing.forEach((node, id) => { if (!wanted.has(id)) node.remove(); });
     if (!players.length) return;
     const lastEvent = store.events.at(-1);
     const latestSpeech = [...store.events].reverse().find(isTranscriptEvent);
@@ -1110,18 +1166,28 @@
         isPk ? `<span class="seat-marker pk">PK</span>` : isWithdrawn ? `<span class="seat-marker withdrawn">退水</span>` : isCandidate ? `<span class="seat-marker candidate">警上</span>` : "",
         isNominated ? `<span class="seat-marker nominated">归票</span>` : "",
       ].filter(Boolean).join("");
-      const seat = document.createElement("article");
-      seat.className = `player-seat ${teamClass}${player.alive ? "" : " dead"}${latestSpeech?.actor && String(latestSpeech.actor) === player.id ? " speaking" : ""}${lastEvent?.target && String(lastEvent.target) === player.id ? " targeted" : ""}${isSheriff ? " sheriff-holder" : ""}${isCandidate ? " sheriff-candidate" : ""}${isWithdrawn ? " sheriff-withdrawn" : ""}${isPk ? " sheriff-pk" : ""}${isNominated ? " sheriff-nominated" : ""}`;
-      seat.style.setProperty("--seat-x", `${x}%`);
-      seat.style.setProperty("--seat-y", `${y}%`);
-      seat.title = `${player.seat}号 ${player.name} · ${label}${isSheriff ? " · 警长" : isPk ? ` · ${pkLabel}` : isWithdrawn ? " · 已退水" : isCandidate ? " · 警上候选" : ""}`;
-      seat.innerHTML = `
-        <span class="seat-number">${escapeHtml(player.seat)}</span>
-        <div class="seat-avatar">${escapeHtml(icon)}</div>
-        <div class="seat-copy"><strong>${escapeHtml(player.name)}</strong><span>${escapeHtml(label)}</span></div>
-        <div class="seat-markers">${markers}</div>
-        <span class="seat-badge ${player.controller === "human" ? "human" : ""}">${player.controller === "human" ? "HUMAN" : escapeHtml(player.model || "AGENT")}</span>`;
-      ring.appendChild(seat);
+      const seat = existing.get(player.id) || document.createElement("article");
+      if (seat.dataset.playerId !== player.id) seat.dataset.playerId = player.id;
+      const className = `player-seat ${teamClass}${player.alive ? "" : " dead"}${latestSpeech?.actor && String(latestSpeech.actor) === player.id ? " speaking" : ""}${lastEvent?.target && String(lastEvent.target) === player.id ? " targeted" : ""}${isSheriff ? " sheriff-holder" : ""}${isCandidate ? " sheriff-candidate" : ""}${isWithdrawn ? " sheriff-withdrawn" : ""}${isPk ? " sheriff-pk" : ""}${isNominated ? " sheriff-nominated" : ""}`;
+      if (seat.className !== className) seat.className = className;
+      if (seat.style.getPropertyValue("--seat-x") !== `${x}%`) seat.style.setProperty("--seat-x", `${x}%`);
+      if (seat.style.getPropertyValue("--seat-y") !== `${y}%`) seat.style.setProperty("--seat-y", `${y}%`);
+      const title = `${player.seat}号 ${player.name} · ${label}${isSheriff ? " · 警长" : isPk ? ` · ${pkLabel}` : isWithdrawn ? " · 已退水" : isCandidate ? " · 警上候选" : ""}`;
+      if (seat.title !== title) seat.title = title;
+      if (!existing.has(player.id)) {
+        seat.innerHTML = `<span class="seat-number"></span><div class="seat-avatar"></div>
+          <div class="seat-copy"><strong></strong><span></span></div>
+          <div class="seat-markers"></div><span class="seat-badge"></span>`;
+      }
+      const textFields = [[".seat-number", player.seat], [".seat-avatar", icon], [".seat-copy strong", player.name], [".seat-copy span", label], [".seat-badge", player.controller === "human" ? "HUMAN" : player.model || "AGENT"]];
+      textFields.forEach(([selector, value]) => {
+        const element = $(selector, seat);
+        if (element.textContent !== String(value)) element.textContent = String(value);
+      });
+      setHtmlIfChanged($(".seat-markers", seat), markers);
+      const badgeClass = `seat-badge${player.controller === "human" ? " human" : ""}`;
+      if ($(".seat-badge", seat).className !== badgeClass) $(".seat-badge", seat).className = badgeClass;
+      if (!seat.isConnected) ring.appendChild(seat);
     });
   }
 
@@ -1135,21 +1201,21 @@
       return category === store.eventFilter;
     });
     if (!filtered.length) {
-      stream.innerHTML = `<div class="empty-state compact-empty"><span class="empty-glyph">⌁</span><strong>${store.events.length ? "没有符合筛选的事件" : "等待第一条事件"}</strong><p>${store.events.length ? "选择其他类型以查看事件。" : "Agent 的行动、发言和规则裁决会依次出现在这里。"}</p></div>`;
+      setHtmlIfChanged(stream, `<div class="empty-state compact-empty"><span class="empty-glyph">⌁</span><strong>${store.events.length ? "没有符合筛选的事件" : "等待第一条事件"}</strong><p>${store.events.length ? "选择其他类型以查看事件。" : "Agent 的行动、发言和规则裁决会依次出现在这里。"}</p></div>`);
       return;
     }
-    stream.innerHTML = filtered.slice(-150).map((event) => {
+    stream.__renderHtml = null;
+    reconcileRows(stream, filtered.slice(-150).map((event) => {
       const meta = eventInfo(event.type);
       const actor = event.actor ? playerName(event.actor) : meta.label;
       const visibility = event.visibility && event.visibility !== "public" ? `<span class="visibility-tag">${escapeHtml(visibilityLabel(event.visibility))}</span>` : "";
-      return `<article class="event-item ${meta.category}">
+      return { key: eventKey(event), html: `<article class="event-item ${meta.category}">
         <span class="event-symbol">${escapeHtml(meta.icon)}</span>
         <strong>${escapeHtml(actor)}</strong>
         <time>${escapeHtml(formatEventTime(event))}</time>
         <p>${escapeHtml(displayEventMessage(event))}${visibility}</p>
-      </article>`;
-    }).join("");
-    requestAnimationFrame(() => { stream.scrollTop = stream.scrollHeight; });
+      </article>` };
+    }));
   }
 
   function visibilityLabel(value) {
@@ -1170,22 +1236,22 @@
     const list = $("#conversation-list");
     const speeches = store.events.filter(isTranscriptEvent);
     if (!speeches.length) {
-      list.innerHTML = `<div class="empty-state inline-empty"><span class="empty-glyph">“</span><div><strong>尚无公开发言</strong><p>进入白天讨论后，Agent 的发言会在此展开。</p></div></div>`;
+      setHtmlIfChanged(list, `<div class="empty-state inline-empty"><span class="empty-glyph">“</span><div><strong>尚无公开发言</strong><p>进入白天讨论后，Agent 的发言会在此展开。</p></div></div>`);
       return;
     }
-    list.innerHTML = speeches.slice(-60).map((event) => {
+    list.__renderHtml = null;
+    reconcileRows(list, speeches.slice(-60).map((event) => {
       const player = store.game?.players.find((item) => String(item.id) === String(event.actor));
       const role = roleInfo(player?.role);
       const context = speechContext(event);
       const metadata = firstDefined(event.metadata, event.data?.metadata, {});
       const badgeFlow = firstDefined(metadata?.badge_flow, event.data?.badge_flow, event.badge_flow);
       const nomination = firstDefined(metadata?.sheriff_nomination, event.data?.sheriff_nomination, event.data?.nomination_target);
-      return `<article class="speech-row">
+      return { key: eventKey(event), html: `<article class="speech-row">
         <div class="speech-avatar">${escapeHtml(role.icon)}</div>
         <div><div class="speech-meta"><strong>${escapeHtml(player?.name || event.actor || "未知 Agent")}</strong><span>${escapeHtml(player?.role ? role.name : "公开频道")}</span>${context ? `<span class="speech-context">${escapeHtml(context)}</span>` : ""}<time>${escapeHtml(formatEventTime(event))}</time></div><p class="speech-bubble">${escapeHtml(displayEventMessage(event))}</p>${renderBadgeFlow(badgeFlow)}${nomination ? `<div class="nomination-chip">♛ 归票建议 · ${escapeHtml(playerName(nomination))}</div>` : ""}</div>
-      </article>`;
-    }).join("");
-    requestAnimationFrame(() => { list.scrollTop = list.scrollHeight; });
+      </article>` };
+    }));
   }
 
   function isTranscriptEvent(event) {
@@ -1266,6 +1332,8 @@
     </div>`;
   }
 
+  // 人类按钮完全由 pending_action.legal_actions 生成；前端不猜测某角色此刻应该
+  // 能做什么。提交后仍由引擎验证 actor、动作类型、目标、内容与 metadata。
   function renderHumanTurn() {
     const panel = $("#human-turn");
     const pending = store.game?.pendingAction;
@@ -1452,6 +1520,14 @@
     $("#result-icon").textContent = store.game.winner?.includes("wolf") ? "♞" : "♜";
     $("#result-title").textContent = `${winner}获胜`;
     $("#result-description").textContent = firstDefined(store.game.evaluation?.result_metrics?.win_reason, store.game.winReason, `历经 ${store.game.round || 0} 个回合，胜负条件已经满足。`);
+    if (store.game.evaluation?.evolution) {
+      const learning = store.game.evaluation.evolution;
+      $("#result-description").textContent += learning.status === "error"
+        ? " 跨局反馈未完成，当前策略未变。"
+        : learning.validation_status === "requires_paid_validation"
+          ? " 经验已记录；DeepSeek 改进验证等待显式费用授权。"
+          : " 经验已记录，后台对照验证结束后仅采用通过门槛的候选策略。";
+    }
     const alive = store.game.players.filter((player) => player.alive).length;
     $("#result-stats").innerHTML = [
       [store.game.round || "—", "回合数"],
@@ -1720,12 +1796,10 @@
       store.eventKeys.clear();
       store.game = transitionGameSnapshot(store.game);
       store.auto = Boolean(store.game?.running);
-      clearInterval(store.pollTimer);
-      closeSocket();
+      stopPolling();
       renderAll();
       try {
         await loadState({ quiet: true });
-        await pollEvents({ quiet: true });
         toast("视角已切换", event.target.options[event.target.selectedIndex].textContent, "success");
       } catch (error) {
         toast("视角切换失败", humanizeError(error), "error");
@@ -1792,9 +1866,11 @@
       renderLeaderboard(button.dataset.role);
     });
     document.addEventListener("visibilitychange", () => { if (!document.hidden && store.game) pollEvents({ quiet: true }); });
-    window.addEventListener("beforeunload", () => { closeSocket(); clearInterval(store.pollTimer); store.runController?.abort(); });
+    window.addEventListener("beforeunload", () => { stopPolling(); store.runController?.abort(); });
   }
 
+  // 启动顺序：绑定交互 -> 读取后端能力（含 DeepSeek 是否可用）-> 恢复最近对局
+  // 或进入创建页。能力接口只暴露布尔状态和模型名，不返回服务端密钥。
   async function initialize() {
     bindEvents();
     renderAll();

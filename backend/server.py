@@ -1,12 +1,18 @@
-"""Dependency-free HTTP API and static server for the Agent Arena.
+"""Agent Arena 的无第三方 Web 依赖 HTTP API 与静态资源服务器。
 
-The core engine has no web dependencies.  This adapter intentionally uses only
-the standard library so a fresh Python installation can run the complete demo.
+核心引擎不知道 HTTP、浏览器或 DeepSeek 密钥；本适配层负责把请求转换为
+``WerewolfGame`` 调用、选择公开/玩家/裁判视角，并管理后台自动运行线程。
+服务端有意只使用 Python 标准库，使全新 Python 环境也能启动完整演示。
+
+DeepSeek 的凭据边界也位于本层：启动时从服务器环境变量创建 Provider，创建
+对局时只把 Provider 对象注入角色 Agent 工厂。API 响应、对局配置、日志、回放
+和评测中均不会保存或返回 API Key。
 """
 
 from __future__ import annotations
 
 import argparse
+from functools import partial
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -21,11 +27,13 @@ from typing import Any, Mapping, Optional
 from urllib.parse import parse_qs, unquote, urlparse
 from uuid import uuid4
 
-from .agents import role_agent_factory
-from .engine import WerewolfGame
+from .agents.factory import create_agent
+from .game.engine import WerewolfGame
 from .evaluation import build_leaderboard, evaluate_game
-from .models import GameConfig, GameStatus
-from .providers import build_deepseek_provider_from_env
+from .evaluation.evolution import EvolutionCoordinator, ExperienceStore, profile_factory, scope_key
+from .game.models import GameConfig, GameStatus
+from .llm import build_deepseek_provider_from_env
+from .logger import write_json_atomic
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -62,6 +70,13 @@ class ApiError(Exception):
 
 
 class GameRecord:
+    """服务端对一局对战的运行时包装。
+
+    ``game`` 保存裁判状态，``strategy``/``model`` 仅是可公开的展示信息；
+    Provider 与密钥不进入记录。``lock`` 保证 HTTP 请求和后台线程不会并发推进
+    同一局状态机。
+    """
+
     def __init__(
         self,
         game_id: str,
@@ -83,6 +98,7 @@ class GameRecord:
         self.running = False
         self.error: Optional[str] = None
         self.report: Optional[dict[str, Any]] = None
+        self.evolution: Optional[dict[str, Any]] = None
         self.lock = threading.RLock()
         self.stop_event = threading.Event()
         # Monotonic ownership token for background runners.  Reusing only a
@@ -93,11 +109,24 @@ class GameRecord:
 
 
 class ArenaManager:
-    """Owns live matches, background runners, reports, and persisted replays."""
+    """统一管理实时对局、后台推进线程、评测报告和落盘回放。"""
 
-    def __init__(self, deepseek_provider: Any = _AUTO_PROVIDER) -> None:
+    def __init__(self, deepseek_provider: Any = _AUTO_PROVIDER, *, evolution_store: ExperienceStore | None = None) -> None:
+        """初始化管理器并建立 DeepSeek Provider 的唯一来源。
+
+        默认哨兵 ``_AUTO_PROVIDER`` 表示调用
+        :func:`build_deepseek_provider_from_env`，由它读取服务器进程环境中的
+        ``DEEPSEEK_API_KEY`` 和可选模型名；端点、超时等参数沿用 Provider 的
+        服务端默认值。测试可以显式传入 ``None``（模拟未配置）或假 Provider，
+        但普通对局请求不能替换 Provider，从而避免客户端注入密钥或任意网络端点。
+        """
+
         self._records: dict[str, GameRecord] = {}
         self._lock = threading.RLock()
+        self._evolution = EvolutionCoordinator(evolution_store) if evolution_store else None
+        # Provider 在服务启动时构造一次，并由多局 DeepSeek Agent 共享；其内部
+        # 只负责模型调用，不保存任何角色的对局记忆。每个角色 Agent 的记忆仍
+        # 隶属于该局、该座位的 Agent 实例。
         self.deepseek_provider = (
             build_deepseek_provider_from_env()
             if deepseek_provider is _AUTO_PROVIDER
@@ -105,12 +134,27 @@ class ArenaManager:
         )
         DATA_ROOT.mkdir(parents=True, exist_ok=True)
 
+    def learning(self) -> EvolutionCoordinator:
+        with self._lock:
+            if self._evolution is None:
+                self._evolution = EvolutionCoordinator(ExperienceStore(DATA_ROOT / "evolution" / "strategies.json"))
+            return self._evolution
+
+    def evolution_status(self) -> dict[str, Any]:
+        try:
+            return self.learning().status()
+        except (OSError, ValueError):
+            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "经验库暂不可用，请稍后重试并检查策略文件") from None
+
     def capabilities(self) -> dict[str, Any]:
-        """Return public provider availability without exposing credentials."""
+        """公开模型是否可用及模型名，但绝不返回 Provider 配置或凭据。"""
 
         provider = self.deepseek_provider
         model = str(getattr(provider, "model", "deepseek-flash")) if provider else None
         return {
+            # 此标准库服务器提供 HTTP 快照与事件接口，不实现 WebSocket 握手。
+            # 显式声明同步能力，便于前端和部署工具选择一致的连接方式。
+            "transport": {"type": "http_polling", "poll_interval_ms": 2200},
             "providers": {
                 "deepseek": {
                     "configured": provider is not None,
@@ -120,9 +164,23 @@ class ArenaManager:
         }
 
     def create(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """根据创建请求组装一局游戏及其五类角色 Agent。
+
+        ``strategy=heuristic`` 使用引擎默认角色工厂；``strategy=deepseek`` 则把
+        服务端已创建的 Provider 交给 :func:`create_agent`。该入口根据
+        每个座位的 ``Role`` 构建 WerewolfAgent、SeerAgent、WitchAgent、
+        HunterAgent 或 VillagerAgent，并为每个实例绑定独立目标、记忆、提示词
+        和规划器。Provider 只是共享的无状态模型出口，不会合并不同 Agent 的
+        上下文。
+
+        请求体中的任何 API Key 字段都会被明确拒绝；密钥只能存在服务器环境，
+        也不会写入 ``GameConfig``、``GameRecord`` 或返回状态。
+        """
+
         config_payload = payload.get("config", payload)
         if not isinstance(config_payload, Mapping):
             raise ApiError(HTTPStatus.BAD_REQUEST, "config 必须是 JSON 对象")
+        # 防御纵深：即使前端误把密钥放入表单，也拒绝整个请求而不是静默保存。
         secret_names = ("api_key", "deepseek_api_key", "DEEPSEEK_API_KEY")
         if any(
             name in source
@@ -144,6 +202,9 @@ class ArenaManager:
                 "strategy 必须是 'heuristic'、'deepseek' 或兼容别名 'llm'",
             )
         try:
+            enable_evolution = config_payload.get("enable_evolution", payload.get("enable_evolution", False))
+            if type(enable_evolution) is not bool:
+                raise ValueError("enable_evolution 必须是布尔值")
             config = GameConfig.from_dict(config_payload)
             if strategy == "deepseek":
                 if self.deepseek_provider is None:
@@ -151,16 +212,31 @@ class ArenaManager:
                         HTTPStatus.BAD_REQUEST,
                         "DeepSeek Provider 尚未配置，请在服务器环境中设置 DEEPSEEK_API_KEY",
                     )
+                # 将 Provider 注入“角色工厂”而不是引擎。WerewolfGame 仍只依赖
+                # Agent 协议；共享的 BaseAgent 负责组织角色提示词并调用模型，
+                # 五类规划器负责离线基线策略，便于在不改规则引擎的前提下替换
+                # 模型或策略版本。
                 game = WerewolfGame(
                     config,
-                    agent_factory=role_agent_factory(self.deepseek_provider),
+                    agent_factory=partial(create_agent, provider=self.deepseek_provider),
                 )
                 model = str(getattr(self.deepseek_provider, "model", "deepseek-flash"))
             else:
+                # 本地启发式仍使用同样的五类独立 Agent，只是不调用外部模型。
                 game = WerewolfGame(config)
                 model = "heuristic"
+            experience = None
+            if enable_evolution:
+                provider = self.deepseek_provider if strategy == "deepseek" else None
+                scope = scope_key(config, provider)
+                profiles = self.learning().store.profiles(scope)
+                game = WerewolfGame(config, agent_factory=profile_factory(profiles, provider))
+                experience = {"enabled": True, "scope": scope,
+                              "versions": {role.value: value.version for role, value in profiles.items()}}
         except ApiError:
             raise
+        except OSError:
+            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "经验库暂不可用，请稍后重试") from None
         except (TypeError, ValueError) as exc:
             raise ApiError(HTTPStatus.BAD_REQUEST, str(exc)) from exc
         game_id = f"game-{uuid4().hex[:10]}"
@@ -171,6 +247,7 @@ class ArenaManager:
             strategy=strategy,
             model=model,
         )
+        record.evolution = experience
         with self._lock:
             self._records[game_id] = record
         human_id = next(
@@ -206,6 +283,8 @@ class ArenaManager:
     def _public_state(
         game: WerewolfGame, viewer_id: Optional[str], omniscient: bool
     ) -> dict[str, Any]:
+        """向引擎请求指定视角状态，并统一转换为 JSON 可序列化结构。"""
+
         try:
             state = game.public_state(viewer_id=viewer_id, omniscient=omniscient)
         except TypeError:
@@ -217,6 +296,8 @@ class ArenaManager:
     def _events(
         game: WerewolfGame, viewer_id: Optional[str], omniscient: bool
     ) -> list[dict[str, Any]]:
+        """读取指定视角的事件流；仅裁判路径可请求全知事件。"""
+
         event_source = getattr(game, "event_log", None)
         if callable(event_source):
             try:
@@ -236,6 +317,13 @@ class ArenaManager:
         viewer_id: Optional[str] = None,
         omniscient: bool = False,
     ) -> dict[str, Any]:
+        """返回对局状态，并在服务端完成最后一层视角脱敏。
+
+        身份、私有事件和待行动信息由引擎投影；本层还会移除可重建牌序的
+        ``roles``/``seed``，并隐藏私有阶段造成的更新时间和后台暂停信号。
+        安全性不依赖前端 CSS 或 JavaScript 是否把字段显示出来。
+        """
+
         record = self.require(game_id)
         with record.lock:
             state = self._public_state(record.game, viewer_id, omniscient)
@@ -275,6 +363,8 @@ class ArenaManager:
                 state["updated_at"] = record.updated_at
             if record.report is not None:
                 state["evaluation"] = record.report
+            if record.evolution is not None:
+                state["evolution"] = record.evolution
             return state
 
     def events(
@@ -300,6 +390,13 @@ class ArenaManager:
         viewer_id: Optional[str] = None,
         omniscient: bool = True,
     ) -> dict[str, Any]:
+        """手动推进对局，并按调用者权限返回结果。
+
+        对公开/玩家视角，一次请求推进到“下一个可观察变化”而不是固定一个
+        裁判内部动作，避免客户端通过无变化的请求次数统计狼人或神职数量。
+        所有 Agent 决策仍由引擎依次执行和校验。
+        """
+
         record = self.require(game_id)
         with record.lock:
             if record.running:
@@ -345,6 +442,8 @@ class ArenaManager:
         viewer_id: Optional[str] = None,
         omniscient: bool = False,
     ) -> dict[str, Any]:
+        """提交人类玩家动作；合法性和行动者身份由引擎统一验证。"""
+
         record = self.require(game_id)
         with record.lock:
             try:
@@ -416,6 +515,13 @@ class ArenaManager:
         max_steps: int,
         generation: int,
     ) -> None:
+        """后台连续推进纯 AI 对局，遇到人类输入或终局即暂停。
+
+        每次循环只调用一次引擎 ``step``，因此单个 Agent 的流程仍是：隔离观察
+        → 记忆/规划 → 可选 DeepSeek 调用 → 动作校验 → 状态更新。``generation``
+        防止快速停止再启动时旧线程与新线程同时推进同一局。
+        """
+
         steps = 0
         try:
             while steps < max_steps:
@@ -465,6 +571,18 @@ class ArenaManager:
                     "config": record.config.to_dict(),
                 },
             )
+            if record.evolution is not None:
+                try:
+                    coordinator = self.learning()
+                    provider = self.deepseek_provider if record.strategy == "deepseek" else None
+                    feedback = coordinator.feedback(record.game_id, record.game, record.report, provider)
+                    record.report["evolution"] = {
+                        **feedback, "versions_used": record.evolution["versions"],
+                        "validation_status": coordinator.schedule(record.config, provider),
+                    }
+                except Exception:
+                    # 经验库失败不能中断胜负结算，也不把 Provider/文件异常带入回放。
+                    record.report["evolution"] = {"status": "error", "reason": "feedback_or_validation_failed"}
         self._persist(record)
 
     def _persist(self, record: GameRecord) -> None:
@@ -479,11 +597,7 @@ class ArenaManager:
         }
         path = DATA_ROOT / f"{record.game_id}.json"
         temporary = DATA_ROOT / f".{record.game_id}.tmp"
-        temporary.write_text(
-            json.dumps(_jsonable(payload), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        temporary.replace(path)
+        write_json_atomic(path, _jsonable(payload), temporary_path=temporary)
 
     def evaluation(
         self,
@@ -624,6 +738,13 @@ class ArenaRequestHandler(BaseHTTPRequestHandler):
         *,
         fallback_viewer: Optional[str] = None,
     ) -> tuple[Optional[str], bool]:
+        """把请求中的 viewer/omniscient 规范化为不可矛盾的视角参数。
+
+        一旦指定具体玩家或显式 ``public``，即使请求同时声称
+        ``omniscient=true`` 也会强制关闭全知模式，防止客户端通过参数组合越权。
+        未指定 viewer 的本地观战台默认使用裁判视角。
+        """
+
         raw_viewer = payload.get("viewer", fallback_viewer)
         viewer = str(raw_viewer) if raw_viewer not in (None, "") else None
         perspective = viewer
@@ -712,6 +833,9 @@ class ArenaRequestHandler(BaseHTTPRequestHandler):
             return
         if parts == ["leaderboard"]:
             self._send_json(manager.leaderboard())
+            return
+        if parts == ["evolution"]:
+            self._send_json(manager.evolution_status())
             return
         if len(parts) >= 2 and parts[0] == "games":
             game_id = parts[1]
@@ -860,6 +984,13 @@ def create_server(
     *,
     manager: Optional[ArenaManager] = None,
 ) -> ThreadingHTTPServer:
+    """创建线程化 HTTP 服务器并绑定唯一的 :class:`ArenaManager`。
+
+    默认 ``MANAGER`` 在模块加载时从环境构建 DeepSeek Provider；测试或嵌入式
+    调用可传入自己的管理器。请求处理器只访问管理器，不直接接触 Provider，
+    从而保持模型配置、对局状态和 HTTP 路由三者解耦。
+    """
+
     server = ThreadingHTTPServer((host, port), ArenaRequestHandler)
     server.arena_manager = (  # type: ignore[attr-defined]
         manager if manager is not None else MANAGER

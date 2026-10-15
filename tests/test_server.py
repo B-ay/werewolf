@@ -5,7 +5,8 @@ import unittest
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from backend import GameConfig, WerewolfGame
+from backend.game.models import GameConfig
+from backend.game.engine import WerewolfGame
 from backend.server import ApiError, ArenaManager, GameRecord, create_server
 
 
@@ -18,7 +19,7 @@ class FakeDeepSeekProvider:
 
     def complete(self, messages, *, temperature=0.2):
         self.calls.append((messages, temperature))
-        # Provider output is deliberately generic. RoleAgent's existing legal
+        # Provider output is deliberately generic. BaseAgent's existing legal
         # action validation will fall back to its planner whenever pass is not
         # legal, so this fake never needs network access or hidden game state.
         return json.dumps({"action_type": "pass"})
@@ -58,6 +59,10 @@ class ServerTests(unittest.TestCase):
         status, health = self.request("/api/health")
         self.assertEqual(status, 200)
         self.assertTrue(health["ok"])
+        self.assertEqual(
+            health["transport"],
+            {"type": "http_polling", "poll_interval_ms": 2200},
+        )
         self.assertEqual(
             health["providers"]["deepseek"],
             {"configured": True, "model": "deepseek-test-model"},

@@ -13,17 +13,16 @@ import random
 import unittest
 from typing import Any, Mapping, Sequence
 
-from backend import GameConfig, Role, WerewolfGame
-from backend.agents import (
-    HunterAgent,
-    RoleMemory,
-    SeerAgent,
-    VillagerAgent,
-    WerewolfAgent,
-    WitchAgent,
-    default_agent_factory,
-)
-from backend.models import ActionType, Observation, Phase
+from backend.game.models import GameConfig, Role
+from backend.game.engine import WerewolfGame
+from backend.agents.hunter import HunterAgent
+from backend.agents.memory import RoleMemory
+from backend.agents.seer import SeerAgent
+from backend.agents.villager import VillagerAgent
+from backend.agents.werewolf import WerewolfAgent
+from backend.agents.witch import WitchAgent
+from backend.agents.factory import create_agent
+from backend.game.models import ActionType, Observation, Phase
 
 
 ROLE_AGENT_TYPES = {
@@ -154,7 +153,7 @@ class RoleAgentArchitectureTests(unittest.TestCase):
     def test_default_factory_returns_five_distinct_role_classes(self) -> None:
         for role, expected_type in ROLE_AGENT_TYPES.items():
             with self.subTest(role=role.value):
-                agent = default_agent_factory("p1", role)
+                agent = create_agent("p1", role)
                 self.assertIs(type(agent), expected_type)
                 self.assertEqual(agent.role, role)
 
@@ -171,7 +170,7 @@ class RoleAgentArchitectureTests(unittest.TestCase):
                 self.assertIsNotNone(agent.planner)
                 self.assertIsInstance(agent.prompt, str)
                 self.assertGreater(len(agent.prompt.strip()), 20)
-                self.assertEqual(agent.prompt, agent.role_prompt)
+                self.assertFalse(hasattr(agent, "role_prompt"))
                 prompts.add(agent.prompt)
 
                 # The goal must itself be JSON-observable for evaluation and
@@ -409,7 +408,7 @@ class RoleAgentArchitectureTests(unittest.TestCase):
             assert_legal(self, action, observation)
             self.assertEqual(action.metadata["claim_role"], Role.SEER.value)
             self.assertEqual(action.metadata["accuse_target"], "p2")
-            self.assertIn("werewolf", action.content.lower())
+            self.assertIn("狼人", action.content)
             flow = action.metadata["badge_flow"]
             self.assertEqual(flow["mode"], "double")
             self.assertEqual(len(flow["targets"]), 2)
@@ -910,9 +909,69 @@ class RoleAgentArchitectureTests(unittest.TestCase):
             system = messages[0]["content"]
             self.assertIn(agent.prompt, system)
             self.assertIn(role.value, system.lower())
+            self.assertIn("简体中文", system)
+            self.assertIn("JSON字段名和枚举值保留原样", system)
             system_prompts.add(system)
 
         self.assertEqual(len(system_prompts), len(Role))
+
+    def test_all_roles_use_chinese_for_speech_and_sheriff_summary(self) -> None:
+        for role, agent_type in ROLE_AGENT_TYPES.items():
+            for phase, action_type in (
+                (Phase.DAY_DISCUSSION, ActionType.SPEAK),
+                (Phase.SHERIFF_SPEECH, ActionType.SPEAK),
+                (Phase.SHERIFF_PK_SPEECH, ActionType.SPEAK),
+                (Phase.DAY_PK_SPEECH, ActionType.SPEAK),
+                (Phase.DAY_DISCUSSION, ActionType.SHERIFF_SUMMARIZE),
+            ):
+                with self.subTest(role=role.value, phase=phase.value, action=action_type.value):
+                    private = {"teammates": ["p2"]} if role is Role.WEREWOLF else {}
+                    if role is Role.SEER:
+                        private["seer_results"] = {"p2": Role.WEREWOLF.value}
+                    observation = make_observation(
+                        role, action_type, phase=phase, content_required=True,
+                        players=self.five_players(), private_facts=private,
+                    )
+                    action = agent_type().decide(observation, random.Random(8))
+                    assert_legal(self, action, observation)
+                    self.assertRegex(action.content, r"[\u3400-\u9fff]")
+                    self.assertNotIn("I ", action.content)
+
+    def test_english_model_speech_falls_back_to_chinese_for_each_role(self) -> None:
+        for role, agent_type in ROLE_AGENT_TYPES.items():
+            with self.subTest(role=role.value):
+                # 汉字姓名不能使一段英文正文通过语言检查。
+                players = self.five_players()
+                players[1]["name"] = "张三"
+                provider = RecordingProvider(json.dumps({
+                    "action_type": "speak", "target_id": "p2",
+                    "content": "I recommend voting against 张三.",
+                }, ensure_ascii=False))
+                agent = agent_type(provider=provider)
+                observation = make_observation(
+                    role, ActionType.SPEAK, phase=Phase.DAY_DISCUSSION,
+                    content_required=True, players=players,
+                )
+                action = agent.decide(observation, random.Random(4))
+                assert_legal(self, action, observation)
+                self.assertRegex(action.content, r"[\u3400-\u9fff]")
+                self.assertNotIn("I recommend", action.content)
+                self.assertEqual(agent.memory.decisions[-1]["source"], "planner_fallback")
+
+    def test_chinese_model_speech_is_used_and_saved_without_translation(self) -> None:
+        content = "我希望先听取这位玩家对票型的解释，再决定是否放逐。"
+        provider = RecordingProvider(json.dumps({
+            "action_type": "speak", "target_id": "p2", "content": content,
+        }, ensure_ascii=False))
+        agent = VillagerAgent(provider=provider)
+        observation = make_observation(
+            Role.VILLAGER, ActionType.SPEAK,
+            phase=Phase.DAY_DISCUSSION, content_required=True,
+        )
+        action = agent.decide(observation, random.Random(4))
+        self.assertEqual(action.content, content)
+        self.assertEqual(agent.memory.decisions[-1]["source"], "provider")
+        self.assertEqual(agent.memory.decisions[-1]["action"]["content"], content)
 
     def test_bad_provider_output_is_repaired_inside_agent(self) -> None:
         invalid_responses = (
@@ -1072,7 +1131,7 @@ class RoleAgentArchitectureTests(unittest.TestCase):
             self.assertNotIn(forbidden, serialized)
 
     def test_factory_bound_agent_rejects_owner_and_role_mismatch(self) -> None:
-        bound = default_agent_factory("p1", Role.VILLAGER)
+        bound = create_agent("p1", Role.VILLAGER)
 
         wrong_owner = make_observation(Role.VILLAGER, ActionType.VOTE)
         wrong_owner.viewer_id = "p2"

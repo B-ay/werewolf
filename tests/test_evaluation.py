@@ -1,6 +1,7 @@
 import unittest
 
-from backend import ActionType, GameConfig, Role, WerewolfGame
+from backend.game.models import ActionType, GameConfig, Role
+from backend.game.engine import WerewolfGame
 from backend.evaluation import EloLeaderboard, build_leaderboard, evaluate_game
 
 
@@ -56,8 +57,8 @@ class EvaluationTests(unittest.TestCase):
             {"seq": 6, "round": 1, "phase": "day_vote", "event_type": "vote_cast", "actor_id": "v2", "target_id": "wolf1"},
             {"seq": 7, "round": 1, "phase": "night_vote", "event_type": "wolf_vote", "actor_id": "wolf1", "target_id": "v2", "visibility": ["wolf1", "wolf2"]},
             {"seq": 8, "round": 1, "phase": "night_vote", "event_type": "wolf_vote", "actor_id": "wolf2", "target_id": "v2", "visibility": ["wolf1", "wolf2"]},
-            {"seq": 9, "round": 1, "phase": "day_result", "event_type": "execution", "target_id": "wolf1"},
-            {"seq": 10, "round": 2, "phase": "end", "event_type": "game_over", "data": {"winner": "village"}},
+            {"seq": 9, "round": 1, "phase": "day_result", "event_type": "death", "target_id": "wolf1"},
+            {"seq": 10, "round": 2, "phase": "finished", "event_type": "game_finished", "data": {"winner": "village"}},
         ]
 
     def test_core_result_and_process_metrics(self):
@@ -78,13 +79,13 @@ class EvaluationTests(unittest.TestCase):
     def test_information_leakage_and_authorized_reveal(self):
         events = [
             {
-                "type": "speech",
+                "event_type": "speech",
                 "actor": "v1",
                 "data": {"private_info": {"wolf": "w1"}},
                 "visibility": "public",
             },
             {
-                "type": "role_reveal",
+                "event_type": "death",
                 "target": "w1",
                 "data": {"secret_role": "werewolf", "authorized_reveal": True},
                 "visibility": "public",
@@ -96,7 +97,7 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(leakage["isolation_score"], 0.5)
 
     def test_whole_game_record_and_missing_fields_are_safe(self):
-        report = evaluate_game({"game_id": "g-1", "events": [{}], "players": [{"id": "p"}]})
+        report = evaluate_game({"game_id": "g-1", "events": [{"event_type": "phase_started"}], "players": [{"id": "p"}]})
         self.assertEqual(report["schema_version"], "1.1")
         self.assertEqual(report["game_id"], "g-1")
         self.assertIsNone(report["result_metrics"]["winner"])
@@ -148,7 +149,7 @@ class EvaluationTests(unittest.TestCase):
                 "seq": 5,
                 "round": 1,
                 "phase": "sheriff_vote",
-                "event_type": "sheriff_vote",
+                "event_type": "sheriff_vote_cast",
                 "actor_id": "v1",
                 "target_id": "seer",
             },

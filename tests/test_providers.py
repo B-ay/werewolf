@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 
-from backend.providers import (
+from backend.llm.provider import (
     DEFAULT_DEEPSEEK_ENDPOINT,
     DEFAULT_DEEPSEEK_MODEL,
     DeepSeekConfigurationError,
@@ -73,7 +73,7 @@ class DeepSeekProviderTests(unittest.TestCase):
             {"role": "system", "content": "Return one JSON object."},
             {"role": "user", "content": "Choose an action."},
         ]
-        with patch("backend.providers.urlopen", side_effect=fake_urlopen):
+        with patch("backend.llm.provider.urlopen", side_effect=fake_urlopen):
             result = provider.complete(messages, temperature=0.2)
 
         self.assertEqual(result, '{"action_type":"vote","target_id":"p2"}')
@@ -98,7 +98,7 @@ class DeepSeekProviderTests(unittest.TestCase):
         self.assertNotIn(TEST_KEY, repr(provider))
 
         upstream = RuntimeError(f"transport included {TEST_KEY} and private body")
-        with patch("backend.providers.urlopen", side_effect=upstream):
+        with patch("backend.llm.provider.urlopen", side_effect=upstream):
             with self.assertRaises(DeepSeekProviderError) as caught:
                 provider.complete([{"role": "user", "content": "JSON please"}])
         rendered = f"{caught.exception!r} {caught.exception}"
@@ -131,8 +131,8 @@ class DeepSeekProviderTests(unittest.TestCase):
 
         provider = DeepSeekProvider(api_key=TEST_KEY)
         with (
-            patch("backend.providers.urlopen", side_effect=fake_urlopen),
-            patch("backend.providers.time.sleep") as sleep,
+            patch("backend.llm.provider.urlopen", side_effect=fake_urlopen),
+            patch("backend.llm.provider.time.sleep") as sleep,
         ):
             result = provider.complete([{"role": "user", "content": "JSON please"}])
         self.assertTrue(result.startswith("{"))
@@ -144,8 +144,8 @@ class DeepSeekProviderTests(unittest.TestCase):
             with self.subTest(status=status):
                 provider = DeepSeekProvider(api_key=TEST_KEY)
                 with (
-                    patch("backend.providers.urlopen", side_effect=http_error(status)) as opener,
-                    patch("backend.providers.time.sleep") as sleep,
+                    patch("backend.llm.provider.urlopen", side_effect=http_error(status)) as opener,
+                    patch("backend.llm.provider.time.sleep") as sleep,
                 ):
                     with self.assertRaises(DeepSeekProviderError) as caught:
                         provider.complete([{"role": "user", "content": "JSON please"}])
@@ -158,8 +158,8 @@ class DeepSeekProviderTests(unittest.TestCase):
     def test_transient_http_failure_retries_only_once(self) -> None:
         provider = DeepSeekProvider(api_key=TEST_KEY, retry_backoff=0)
         with (
-            patch("backend.providers.urlopen", side_effect=[http_error(503), http_error(503)]) as opener,
-            patch("backend.providers.time.sleep") as sleep,
+            patch("backend.llm.provider.urlopen", side_effect=[http_error(503), http_error(503)]) as opener,
+            patch("backend.llm.provider.time.sleep") as sleep,
         ):
             with self.assertRaises(DeepSeekProviderError) as caught:
                 provider.complete([{"role": "user", "content": "JSON please"}])
@@ -171,8 +171,8 @@ class DeepSeekProviderTests(unittest.TestCase):
         provider = DeepSeekProvider(api_key=TEST_KEY, retry_backoff=0)
         failure = URLError(f"network details {TEST_KEY}")
         with (
-            patch("backend.providers.urlopen", side_effect=[failure, failure]) as opener,
-            patch("backend.providers.time.sleep"),
+            patch("backend.llm.provider.urlopen", side_effect=[failure, failure]) as opener,
+            patch("backend.llm.provider.time.sleep"),
         ):
             with self.assertRaises(DeepSeekProviderError) as caught:
                 provider.complete([{"role": "user", "content": "JSON please"}])
@@ -190,7 +190,7 @@ class DeepSeekProviderTests(unittest.TestCase):
         for response in invalid_responses:
             with self.subTest(payload=response.payload):
                 provider = DeepSeekProvider(api_key=TEST_KEY, max_retries=0)
-                with patch("backend.providers.urlopen", return_value=response):
+                with patch("backend.llm.provider.urlopen", return_value=response):
                     with self.assertRaisesRegex(
                         DeepSeekProviderError, "invalid response"
                     ):
@@ -205,7 +205,7 @@ class DeepSeekProviderTests(unittest.TestCase):
             DeepSeekProvider(api_key=TEST_KEY, max_retries=2)
 
         provider = DeepSeekProvider(api_key=TEST_KEY)
-        with patch("backend.providers.urlopen") as opener:
+        with patch("backend.llm.provider.urlopen") as opener:
             with self.assertRaises(DeepSeekProviderError):
                 provider.complete([])
             with self.assertRaises(DeepSeekProviderError):

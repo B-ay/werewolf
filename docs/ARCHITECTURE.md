@@ -22,6 +22,39 @@ Observation ──► Role Agent ──► Intent
                                观战 UI       量化评测        复盘归因
 ```
 
+## 代码模块边界
+
+当前后端按职责拆分为五个包，`server.py` 保留在 `backend` 根目录：
+
+| 包 | 主要实现 | 依赖与职责 |
+|---|---|---|
+| `backend/agents` | `base.py`、五个角色文件、`memory.py`、`planner.py`、`factory.py` | 接收玩家 `Observation`，维护独立记忆，生成合法动作；模型能力通过协议注入 |
+| `backend/llm` | `base.py`、`provider.py` | 定义 `LLMProvider`，处理 DeepSeek 请求、重试、环境配置与脱敏 |
+| `backend/game` | `models.py`、`engine.py` | 定义领域契约，驱动回合、信息隔离、警长和胜负规则 |
+| `backend/logger` | `events.py`、`storage.py` | 保存结构化裁判事件，按视角投影，并原子写入回放 |
+| `backend/evaluation` | `common.py`、`metrics.py`、`replay.py`、`evaluator.py`、`leaderboard.py`、`tournament.py` | 从事件生成 Schema 1.1 评测、中文复盘、批量竞技与 Elo |
+
+`WerewolfAgent`、`SeerAgent`、`WitchAgent`、`VillagerAgent`、`HunterAgent` 分别位于
+`agents/werewolf.py`、`seer.py`、`witch.py`、`villager.py`、`hunter.py`，每个文件同时
+维护对应的角色专属 Planner。五类实现均继承 `BaseAgent`：共有的视角校验和记忆
+摄取在 `update_state()` 中完成；`build_context_prompt()` 只组合本人的观察和裁剪
+记忆；`plan()` 调用角色规划器并校验本地基线；`decide()` 处理可选模型覆盖、中文
+检查、合法性校验、失败降级和最终动作记录。对外只保留 `decide()`；公共目标选择、
+嫌疑评分、发言、投票和警长策略集中在 `RolePlanner`，角色子类只实现自己的策略差异。
+
+结构参考角色模板，但保留同步 `Observation → Action` 协议：女巫解药/毒药仍是
+独立合法子阶段，死亡警长与猎枪仍由引擎按既定顺序处理。兼容 Agent、旧模块入口和
+`RoleAgent` 别名已经删除；包初始化不再重复导出或动态加载核心实现。
+
+依赖方向为：`game.models` 提供契约；`agents.base` 使用记忆、规划与模型协议；
+五类角色继承公共基础设施；`agents.factory.create_agent` 注册五类角色；
+`game.engine` 通过最小 `decide` 协议调用玩家；`server` 绑定 Provider 并连接日志与评测。
+使用明确模块导入，不需要循环依赖的动态转发。
+
+Agent 和引擎的校验刻意分开：前者防止非法模型输出并执行角色本地降级，后者是所有
+AI 与人类动作进入状态机的最终裁决。服务端序列化保持公开响应边界，竞技模块的
+裁判数据序列化不与其合并。历史回放及记忆快照的兼容读取仍保留。
+
 ## 信息隔离
 
 - 狼人只额外获得存活狼队友列表与夜间同伴意图。
@@ -69,7 +102,7 @@ Agent 接口不接收 `GameState`，只接收与权威数据深度分离的观�
 
 ## Agent 分层
 
-系统不是用一个通用 Agent 在内部按 `role` 写条件分支，而是提供五个具体实现：`WerewolfAgent`、`SeerAgent`、`WitchAgent`、`HunterAgent` 和 `VillagerAgent`。`default_agent_factory` 按身份直接构造对应类型，引擎仍只依赖统一的 `decide(observation, rng)` 协议。
+系统不是用一个通用 Agent 在内部按 `role` 写条件分支，而是提供五个具体实现：`WerewolfAgent`、`SeerAgent`、`WitchAgent`、`HunterAgent` 和 `VillagerAgent`。`create_agent` 按身份直接构造对应类型，引擎仍只依赖统一的 `decide(observation, rng)` 协议。
 
 每个角色实例由四个相互独立的部件组成：
 
@@ -139,6 +172,16 @@ python run.py
 
 ## 测评与复盘
 
+评测入口统一为 `evaluate_game()`，只接受本项目事件、玩家状态和保存的回放。
+规范化入口一次建立类型、行动者、回合及票型索引；所有过程指标复用这些索引，
+不再反射任意对象、模糊匹配外部事件名或重复扫描每个玩家的整局事件。
+警长评测分别统计竞选、领导力与加权票、警徽传承与警徽流，再组合为原有字段。
+旧无警长回放和现有报告字段保留；本次精简不改变历史技能计数、贡献分或 Elo 口径。
+
+竞技以固定两参数 Agent 工厂创建独立策略，直接调用本项目引擎的
+`run/result/event_log` 接口，保留固定 seed、座位轮换、步数上限与失败隔离。
+任意外部引擎、工厂签名探测和原型克隆不再属于支持范围。
+
 评测器输出 `1.1` schema 的三层结果：
 
 - 结果层：阵营胜负、角色存活、局长、淘汰顺序。
@@ -150,6 +193,39 @@ python run.py
 榜单对 Agent 版本维护场次、胜率、分角色胜率与 Elo。Elo 更新以一局中的阵营对抗为单位，避免简单胜率被角色分配偏差主导。
 
 ## 扩展点
+
+### 自进化边界与执行链
+
+`backend/agents/strategy.py` 定义 `RoleStrategy`：只有有界参数、版本号和角色白名单经验代码，
+拒绝任意提示词、旧局身份与座位事实。`BaseAgent` 将其复制到独立 `RoleMemory.experience`，
+模板经验进入 `reflections` 与模型上下文，参数进入本座位 `RolePlanner.parameters`。
+旧快照没有 experience 时仍按原方式恢复；未注入策略时不改变上下文、策略或随机数顺序。
+
+`backend/evaluation/evolution.py` 负责闭环，不向引擎加入学习逻辑：
+
+```text
+训练/实时对局结束 → evaluate_game → game_feedback（仅 AI 角色汇总）
+    → ExperienceStore.record（去重、训练/验证隔离）
+    → propose_strategy（有界参数 + 通用模板经验）
+    → EvolutionRunner.validate（独立 seed，旧版/候选版成对对照）
+    → validation_gate → commit
+         ├─ 不通过/不足：保留原版本，记录原因
+         └─ 通过：保存新版本，后续新局经 profile_factory 创建独立 Agent
+```
+
+每轮只替换一个角色策略，其余角色的版本固定；同一 seed 的两局使用相同角色分配。
+晋级至少需 24 对、胜率差 ≥ 0.05、贡献分差 ≥ -0.02、零泄露/动作修复、模型降级率不增加，
+以及多候选校正后的单侧精确符号检验。保存时再次校验成对证据与基线/对手版本，
+避免后台并发或另一个进程将过时实验覆盖到正式策略。晋级后清空该角色旧版本的累计错误，
+保留审计历史中的反馈快照，等待新版本的新局反馈。
+
+`EvolutionCoordinator` 在完局后生成通用复盘经验，并协调后台本地验证；验证期间的新反馈会排队处理。
+`ArenaManager` 只在创建请求明确开启 `enable_evolution` 时接线，HTTP `/api/evolution` 返回版本库和作业状态。
+DeepSeek 实时对局的反馈与本地反馈分库，自动验证不会调用模型；模型批量实验只允许显式 CLI 费用授权。
+验证局不参与在线训练、原有 Elo 或排行榜，现有评测 Schema 和游戏规则不变。
+存储位于 `data/evolution/strategies.json`，采用跨进程锁与原子 JSON 替换；锁竞争明确失败。
+
+### 其他扩展
 
 - 新角色：实现能力阶段、观察投影与合法动作校验，并注册到角色表。
 - 新 Agent：实现统一决策协议，不需要修改引擎。

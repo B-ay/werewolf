@@ -1,6 +1,7 @@
 import unittest
 
-from backend import GameConfig, GameStatus, InvalidAction, Role, WerewolfGame
+from backend.game.models import GameConfig, GameStatus, Role
+from backend.game.engine import InvalidAction, WerewolfGame
 
 
 ROLES = [
@@ -31,6 +32,28 @@ class EngineTests(unittest.TestCase):
         self.assertEqual([event["seq"] for event in events], list(range(1, len(events) + 1)))
         self.assertEqual(events[-1]["event_type"], "game_finished")
         self.assertFalse(any(event["event_type"] == "agent_action_repaired" for event in events))
+
+    def test_full_game_uses_chinese_agent_speech_and_private_feedback(self):
+        game = WerewolfGame(GameConfig(roles=ROLES, shuffle_roles=False, seed=31415))
+        game.run()
+        communication_types = {
+            "speech", "sheriff_speech", "sheriff_pk_speech", "sheriff_summary",
+            "day_pk_speech", "wolf_vote", "wolf_target", "seer_check",
+            "witch_save", "witch_save_passed", "witch_poison", "witch_poison_passed",
+        }
+        communications = [
+            event for event in game.event_log(omniscient=True)
+            if event["event_type"] in communication_types
+        ]
+        self.assertTrue(communications)
+        self.assertTrue(any(event["event_type"] == "wolf_vote" for event in communications))
+        self.assertTrue(any(event["event_type"] == "sheriff_speech" for event in communications))
+        for event in communications:
+            with self.subTest(event=event["event_type"], seq=event["seq"]):
+                self.assertRegex(event["message"], r"[\u3400-\u9fff]")
+        # 交流文案改变不改变私有夜票的可见范围。
+        public = game.event_log()
+        self.assertFalse(any(event["event_type"] == "wolf_vote" for event in public))
 
     def test_roles_and_private_events_are_isolated(self):
         game = WerewolfGame(

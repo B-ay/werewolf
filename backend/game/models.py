@@ -1,8 +1,17 @@
-"""Core data models for the multi-agent Werewolf game.
+"""狼人杀多智能体系统的跨模块数据契约。
 
-The module deliberately contains no framework dependencies.  Every public model
-can be converted to a JSON-friendly dictionary, which keeps the engine usable
-from a CLI, a web API, or a tournament runner.
+本模块故意不依赖 HTTP 框架、具体 Agent 或大模型 SDK。引擎、Agent、服务端、
+评测器都只通过这里定义的对象交换数据，因此阅读代码时可以把本文件理解成整个
+项目的“协议层”：
+
+* :class:`Observation` 是裁判允许某个 Agent 看到的全部信息，Agent 不应直接接触
+  ``GameState`` 或其他玩家的私有状态；
+* :class:`LegalAction` 描述当前时点允许做什么，:class:`Action` 则是 Agent 最终
+  提交的意图，真正执行前仍会由引擎二次校验；
+* :class:`GameEvent` 是只追加的事实日志，同时承担前端展示、记忆写入、评测和复盘
+  的共同数据源；
+* 所有 ``to_dict`` 都返回可安全序列化的副本，避免调用方通过嵌套列表或字典反向
+  修改裁判状态。
 """
 
 from __future__ import annotations
@@ -56,6 +65,11 @@ class GameStatus(str, Enum):
 
 
 class Phase(str, Enum):
+    """完整对局状态机的公开阶段枚举。
+
+    枚举值足够细，便于引擎选择当前行动者与合法动作；``public_name`` 则把多个
+    私有夜间阶段或警长子阶段折叠成适合普通观战者展示的粗粒度名称。
+    """
     NIGHT_WOLF = "night_wolf"
     NIGHT_SEER = "night_seer"
     NIGHT_WITCH_SAVE = "night_witch_save"
@@ -255,6 +269,13 @@ class GameEvent:
 
 @dataclass(slots=True)
 class LegalAction:
+    """引擎为当前行动者生成的动作白名单。
+
+    ``target_ids`` 已经完成存活、身份和阶段过滤。规划器以及 DeepSeek 只能在这个
+    集合内选择目标；``can_pass`` 和 ``content_required`` 分别约束能否弃权、是否
+    必须提供发言文本。该对象是“建议空间”，最终 :class:`Action` 仍由引擎校验。
+    """
+
     action_type: ActionType
     target_ids: tuple[str, ...] = ()
     can_pass: bool = False
@@ -273,6 +294,12 @@ class LegalAction:
 
 @dataclass(slots=True)
 class PendingAction:
+    """暂停等待人类输入时返回给前端的最小安全快照。
+
+    它只包含当前玩家、公开阶段、提示和合法动作，不携带其他角色的私有事实。
+    AI 玩家不会长期保存该对象，而是在 ``step`` 中立即完成一次决策。
+    """
+
     actor_id: str
     phase: Phase
     legal_actions: tuple[LegalAction, ...]
@@ -291,7 +318,13 @@ class PendingAction:
 
 @dataclass(slots=True)
 class Observation:
-    """The complete and only information passed to an agent."""
+    """一次 Agent 决策可使用的完整且唯一的信息输入。
+
+    ``self_state`` 保存本人的公开/私有状态，``players`` 是按观察者权限脱敏后的
+    座位列表，``events`` 只包含该观察者可见的事件，``private_facts`` 则承载查验
+    结果、狼队成员等合法私有事实。长期记忆也只能从这份对象吸收信息，不能回读
+    引擎内部状态；这一约束是防止信息泄露的核心边界。
+    """
 
     viewer_id: str
     round: int
@@ -334,11 +367,14 @@ def default_role_deck(player_count: int) -> list[Role]:
 
 @dataclass(slots=True)
 class GameConfig:
-    """Configuration accepted directly by :class:`WerewolfGame`.
+    """直接传给 ``WerewolfGame`` 的对局配置。
 
-    ``human_player`` is a convenience alias for a single entry in
-    ``human_players``. References may be a player id (``p1``), a player name,
-    or a one-based numeric seat.
+    ``__post_init__`` 会完成默认牌组生成、角色数量校验、人类座位合并和规则参数
+    校验，使引擎启动后不必反复处理不完整配置。``seed`` 只用于可复现的裁判随机
+    流；各 Agent 仍持有相互独立的随机流。
+
+    ``human_player`` 是单个人类座位的便捷别名，最终会合并进 ``human_players``。
+    座位引用可以是玩家 ID（如 ``p1``）、玩家名或从 1 开始的座位号。
     """
 
     player_count: int = 8

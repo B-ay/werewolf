@@ -3,9 +3,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from backend.agents import VillagerAgent
-from backend.models import Role
-from backend.tournament import (
+from backend.agents.villager import VillagerAgent
+from backend.game.models import Role
+from backend.evaluation.tournament import (
     Competitor,
     TournamentError,
     TournamentRunner,
@@ -53,11 +53,14 @@ class FakeGame:
 
 
 class TournamentTests(unittest.TestCase):
-    def test_agent_factories_receive_seat_context_and_instances_are_cloned(self):
+    def test_agent_factories_receive_seat_context_and_create_independent_instances(self):
         class ContextAgent:
             def __init__(self, player_id, role):
                 self.player_id = player_id
                 self.role = role
+
+            def decide(self, observation, rng):
+                raise NotImplementedError("construction-only test double")
 
         contextual = _instantiate_agent(
             Competitor("context", factory=ContextAgent), "p7", Role.SEER
@@ -65,16 +68,22 @@ class TournamentTests(unittest.TestCase):
         self.assertEqual(contextual.player_id, "p7")
         self.assertIs(contextual.role, Role.SEER)
 
-        # An explicit stateful prototype is never reused between tournament
-        # seats or games; in particular its private RoleMemory is independent.
-        prototype = VillagerAgent()
-        competitor = Competitor("prototype", factory=prototype)
+        # 统一工厂显式创建新实例，不再反射签名或猜测如何克隆原型。
+        competitor = Competitor("fresh", factory=lambda player_id, role: VillagerAgent(owner_id=player_id))
         first = _instantiate_agent(competitor, "p1", Role.VILLAGER)
         second = _instantiate_agent(competitor, "p2", Role.VILLAGER)
-        self.assertIsNot(first, prototype)
-        self.assertIsNot(second, prototype)
         self.assertIsNot(first, second)
         self.assertIsNot(first.memory, second.memory)
+        self.assertEqual((first.owner_id, second.owner_id), ("p1", "p2"))
+
+    def test_unsupported_agent_factories_fail_explicitly(self):
+        with self.assertRaisesRegex(TypeError, "prototypes are unsupported"):
+            Competitor("prototype", factory=VillagerAgent())
+        for factory in (lambda: VillagerAgent(), lambda player_id: VillagerAgent()):
+            with self.subTest(factory=factory), self.assertRaisesRegex(TypeError, "accept"):
+                _instantiate_agent(Competitor("wrong-signature", factory=factory), "p1", Role.VILLAGER)
+        with self.assertRaisesRegex(TypeError, "return an Agent"):
+            _instantiate_agent(Competitor("wrong-result", factory=lambda player_id, role: {}), "p1", Role.VILLAGER)
 
     def test_multi_seed_multi_game_collection_and_rotation(self):
         created = []
@@ -109,10 +118,10 @@ class TournamentTests(unittest.TestCase):
         json.dumps(report, ensure_ascii=False)
 
     def test_failure_isolation_and_fail_fast(self):
-        def unreliable(config):
+        def unreliable(config, *, agent_factory):
             if config["seed"] == 2:
                 raise RuntimeError("broken seed")
-            return FakeGame(config)
+            return FakeGame(config, agent_factory)
 
         report = TournamentRunner(unreliable).run(
             [1, 2, 3], game_config={"player_count": 2}

@@ -1,4 +1,12 @@
-"""Deterministic, information-isolated Werewolf game engine."""
+"""确定性、严格信息隔离的狼人杀裁判引擎。
+
+本模块负责“规则与权限”，而不是负责角色推理：五类角色 Agent 的记忆、
+提示词和规划器位于 :mod:`backend.agents`，模型 Provider 位于
+:mod:`backend.llm.provider`。引擎只向当前行动者下发裁剪后的
+:class:`~backend.game.models.Observation`，并在动作进入状态机前做统一校验。
+因此无论 Agent 使用本地启发式还是 DeepSeek，均不能绕过合法动作集合读取或
+修改裁判私有状态。
+"""
 
 from __future__ import annotations
 
@@ -6,7 +14,9 @@ import random
 from collections import Counter
 from typing import Any, Mapping, Optional, Sequence
 
-from .agents import Agent, AgentFactory, default_agent_factory
+from ..agents.base import Agent
+from ..agents.factory import AgentFactory, create_agent
+from ..logger import EventLogger
 from .models import (
     Action,
     ActionType,
@@ -29,14 +39,15 @@ class InvalidAction(ValueError):
 
 
 class WerewolfGame:
-    """A complete turn-based Werewolf match.
+    """一局完整的回合制狼人杀对局。
 
-    The engine is synchronous by design. ``step`` advances at most one player
-    decision (or one automatic transition), while ``run`` advances until the
-    game finishes or a human-controlled player needs input.
+    引擎有意设计为同步状态机：``step`` 最多推进一次玩家决策或一次自动阶段
+    转换；``run`` 则持续调用 ``step``，直到对局结束、需要人类输入或达到步数
+    上限。这样的粒度使服务端既能逐步观战，也能在后台连续运行纯 AI 对局。
 
-    Security boundary: autonomous agents only receive :class:`Observation`.
-    They never receive this object, its player-role map, or referee events.
+    信息安全边界：自主 Agent 只能收到 :class:`Observation`，永远拿不到当前
+    ``WerewolfGame`` 实例、完整身份映射或裁判事件。每次决策都重新生成角色
+    视角，避免把上一阶段的私有事实错误传播给其他玩家。
     """
 
     def __init__(
@@ -68,30 +79,35 @@ class WerewolfGame:
                 controller="human" if player_id in human_ids else "ai",
             )
 
+        # Agent 装配支持两层覆盖：测试/实验可以通过 ``agents`` 为某个座位或
+        # 玩家名注入实例；其余 AI 座位交给工厂按角色创建。默认工厂产生本地
+        # 启发式的 WerewolfAgent / SeerAgent / WitchAgent / HunterAgent /
+        # VillagerAgent；服务端启用 DeepSeek 时会传入绑定 Provider 的角色工厂。
+        # 人类座位不创建 Agent，其决策在 ``pending_action`` 中等待 HTTP 输入。
         supplied_agents = dict(agents or {})
-        factory = agent_factory or default_agent_factory
+        factory = agent_factory or create_agent
         self.agents: dict[str, Agent] = {}
         for player in self.players.values():
             if player.controller == "human":
                 continue
             candidate = supplied_agents.get(player.id, supplied_agents.get(player.name))
             self.agents[player.id] = candidate or factory(player.id, player.role)
-        # Policies get independent deterministic streams.  An experimental
-        # agent therefore cannot perturb referee tie-breaks by consuming extra
-        # random numbers.
+        # 每个 Agent 拥有独立且可复现的随机流。策略即使额外抽取随机数，也不会
+        # 改变其他 Agent 或裁判的平票裁决，从而保证同 seed 对局可复盘、可比较。
         self._agent_rngs: dict[str, random.Random] = {
             player_id: random.Random(config.seed + index * 1_000_003)
             for index, player_id in enumerate(self.players, start=1)
         }
-        # Invalid-policy repair uses streams that policies never receive.
-        # Otherwise an Agent could consume its provided RNG before returning
-        # an invalid action and thereby steer the engine's safe fallback.
+        # 非法动作修复再使用一组 Agent 永远接触不到的随机流。否则恶意/有缺陷的
+        # Agent 可以先消耗自己的 RNG，再故意返回非法动作来操纵兜底目标。
         self._fallback_rngs: dict[str, random.Random] = {
             player_id: random.Random(config.seed + 9_000_019 + index * 2_000_033)
             for index, player_id in enumerate(self.players, start=1)
         }
 
-        self.events: list[GameEvent] = []
+        self.logger = EventLogger()
+        # 保留 events 引用供既有裁判/评测工具读取；序号和视角投影由 logger 管理。
+        self.events: list[GameEvent] = self.logger.events
         self.round = 1
         self.phase = Phase.NIGHT_WOLF
         self.status = GameStatus.RUNNING
@@ -172,7 +188,7 @@ class WerewolfGame:
                 teammates = [pid for pid in wolf_ids if pid != player.id]
                 self._log(
                     "wolf_team",
-                    "Your werewolf teammates are known to you.",
+                    "你已获知自己的狼人队友。",
                     actor_id=player.id,
                     data={"teammates": teammates},
                     visibility=(player.id,),
@@ -185,7 +201,12 @@ class WerewolfGame:
     def step(
         self, action: Action | Mapping[str, Any] | None = None
     ) -> dict[str, Any]:
-        """Advance one decision/transition and return a public snapshot."""
+        """推进一个决策或阶段转换，并返回默认公开视角的快照。
+
+        传入 ``action`` 时走人类动作提交链路；未传入时根据当前 ``phase`` 选择
+        唯一处理器。处理器只负责构造本阶段的合法动作空间，真正的 Agent 调用
+        统一收口到 :meth:`_request_or_act`。
+        """
 
         if action is not None:
             return self.submit_action(action)
@@ -234,7 +255,12 @@ class WerewolfGame:
     def submit_action(
         self, value: Action | Mapping[str, Any]
     ) -> dict[str, Any]:
-        """Submit the currently pending human decision."""
+        """提交当前等待中的人类决策。
+
+        人类与 AI 共用同一套 :meth:`_validate_action` 与
+        :meth:`_consume_action`，浏览器不能直接跳阶段、替别人行动或指定不在
+        合法目标集合中的玩家。
+        """
 
         if self.pending_action is None:
             raise InvalidAction("the game is not waiting for a human action")
@@ -251,7 +277,18 @@ class WerewolfGame:
         viewer_id: str,
         legal_actions: Optional[Sequence[LegalAction]] = None,
     ) -> Observation:
-        """Build an information-filtered observation for one player."""
+        """为一个玩家构造经过信息过滤的 Agent 观察。
+
+        ``Observation`` 是裁判与 Agent 之间唯一的数据契约，包含：自身私有
+        身份、按视角投影的玩家列表、该视角可见的事件、当前合法动作，以及该
+        角色允许知道的私有事实。狼人只获得队友，预言家只获得自己的历史查验，
+        女巫只获得药物余量且仅在对应夜间阶段看到刀口；村民和猎人不会获得
+        额外身份事实。公开的警长状态可被所有角色观察，但不包含查验真值。
+
+        ``legal_actions`` 由当前阶段处理器即时生成。规划器和 DeepSeek 都应在
+        这个有限动作空间内选择，随后引擎仍会再次校验，形成“不信任模型输出”
+        的双重防线。
+        """
 
         if viewer_id not in self.players:
             raise KeyError(f"unknown player: {viewer_id}")
@@ -288,27 +325,25 @@ class WerewolfGame:
     def event_log(
         self, viewer_id: Optional[str] = None, *, omniscient: bool = False
     ) -> list[dict[str, Any]]:
-        """Return the event stream filtered for a public/player/referee view."""
+        """返回按公开、玩家或裁判视角过滤后的事件流。
+
+        事件的 ``visibility`` 在写入时确定；读取时只筛选，不依赖前端隐藏。
+        过滤后重新连续编号，避免玩家从序号缺口推断夜间发生了多少次私有动作。
+        """
 
         if viewer_id is not None and viewer_id not in self.players:
             raise KeyError(f"unknown player: {viewer_id}")
-        if omniscient:
-            return [event.to_dict(include_visibility=True) for event in self.events]
-
-        # Re-number a filtered stream so gaps in referee sequence numbers cannot
-        # be used as a side channel to count another role's private actions.
-        selected = [event for event in self.events if event.visible_to(viewer_id)]
-        result: list[dict[str, Any]] = []
-        for visible_seq, event in enumerate(selected, start=1):
-            item = event.to_dict(include_visibility=False)
-            item["seq"] = visible_seq
-            result.append(item)
-        return result
+        return self.logger.project(viewer_id, omniscient=omniscient)
 
     def public_state(
         self, viewer_id: Optional[str] = None, *, omniscient: bool = False
     ) -> dict[str, Any]:
-        """Return a JSON-friendly state without leaking inaccessible facts."""
+        """返回不会泄露不可见事实的 JSON 友好状态投影。
+
+        ``viewer_id`` 指定玩家视角，``omniscient`` 仅供裁判、回放和评测使用。
+        夜间私有人类提示不会向其他视角暴露行动者、具体子阶段或“等待人类”
+        状态，防止通过轮询接口反推出隐藏角色。
+        """
 
         if viewer_id is not None and viewer_id not in self.players:
             raise KeyError(f"unknown player: {viewer_id}")
@@ -418,8 +453,8 @@ class WerewolfGame:
             self._phase_queue.clear()
             self._resolve_wolf_votes()
             return
-        legal = (LegalAction(ActionType.WOLF_KILL, targets, description="Choose a night victim."),)
-        self._request_or_act(actor, legal, "Choose the werewolves' night target.")
+        legal = (LegalAction(ActionType.WOLF_KILL, targets, description="选择今晚的击杀目标。"),)
+        self._request_or_act(actor, legal, "请选择狼队今晚的击杀目标。")
 
     def _step_seer(self) -> None:
         if not self._phase_queue:
@@ -432,8 +467,8 @@ class WerewolfGame:
         if not targets:
             self._phase_queue.pop(0)
             return
-        legal = (LegalAction(ActionType.SEER_CHECK, targets, description="Inspect one player."),)
-        self._request_or_act(actor, legal, "Choose a player to inspect.")
+        legal = (LegalAction(ActionType.SEER_CHECK, targets, description="查验一名玩家。"),)
+        self._request_or_act(actor, legal, "请选择今晚要查验的玩家。")
 
     def _step_witch_save(self) -> None:
         if not self._phase_queue:
@@ -452,10 +487,10 @@ class WerewolfGame:
                 ActionType.WITCH_SAVE,
                 targets,
                 can_pass=True,
-                description="Use the antidote on tonight's victim, or pass.",
+                description="对今晚的被袭击者使用解药，或选择不使用。",
             ),
         )
-        self._request_or_act(actor, legal, "Use the antidote or pass.")
+        self._request_or_act(actor, legal, "请选择使用解药或保留解药。")
 
     def _step_witch_poison(self) -> None:
         if not self._phase_queue:
@@ -473,10 +508,10 @@ class WerewolfGame:
                 ActionType.WITCH_POISON,
                 targets,
                 can_pass=True,
-                description="Use poison on one player, or pass.",
+                description="对一名玩家使用毒药，或选择不使用。",
             ),
         )
-        self._request_or_act(actor, legal, "Use poison or pass.")
+        self._request_or_act(actor, legal, "请选择使用毒药或保留毒药。")
 
     def _resolve_night(self) -> None:
         deaths: list[tuple[str, str]] = []
@@ -554,10 +589,10 @@ class WerewolfGame:
             LegalAction(
                 ActionType.SHERIFF_RUN,
                 can_pass=True,
-                description="Run for sheriff, or remain off the ballot.",
+                description="参与警长竞选，或选择不上警。",
             ),
         )
-        self._request_or_act(actor, legal, "Choose whether to run for sheriff.")
+        self._request_or_act(actor, legal, "请选择是否参与警长竞选。")
 
     def _step_sheriff_speech(self) -> None:
         if not self._phase_queue:
@@ -570,10 +605,10 @@ class WerewolfGame:
                 ActionType.SPEAK,
                 targets,
                 content_required=True,
-                description="Give a public sheriff campaign speech.",
+                description="发表公开的警长竞选发言。",
             ),
         )
-        self._request_or_act(actor, legal, "Give your sheriff campaign speech.")
+        self._request_or_act(actor, legal, "请发表警长竞选发言。")
 
     def _step_sheriff_withdraw(self) -> None:
         if not self._phase_queue:
@@ -584,10 +619,10 @@ class WerewolfGame:
             LegalAction(
                 ActionType.SHERIFF_WITHDRAW,
                 can_pass=True,
-                description="Withdraw from the sheriff election, or stay in.",
+                description="退出警长竞选，或选择继续竞选。",
             ),
         )
-        self._request_or_act(actor, legal, "Choose whether to withdraw.")
+        self._request_or_act(actor, legal, "请选择退水或继续竞选。")
 
     def _step_sheriff_vote(self) -> None:
         if not self._phase_queue:
@@ -600,10 +635,10 @@ class WerewolfGame:
                 ActionType.SHERIFF_VOTE,
                 targets,
                 can_pass=True,
-                description="Vote for sheriff, or abstain.",
+                description="投票给一名警长候选人，或弃权。",
             ),
         )
-        self._request_or_act(actor, legal, "Cast your sheriff ballot or abstain.")
+        self._request_or_act(actor, legal, "请投出警长票或选择弃权。")
 
     def _step_sheriff_pk_speech(self) -> None:
         if not self._phase_queue:
@@ -616,10 +651,10 @@ class WerewolfGame:
                 ActionType.SPEAK,
                 targets,
                 content_required=True,
-                description="Give a sheriff runoff speech.",
+                description="发表警长竞选PK发言。",
             ),
         )
-        self._request_or_act(actor, legal, "Give your sheriff runoff speech.")
+        self._request_or_act(actor, legal, "请发表警长竞选PK发言。")
 
     def _step_sheriff_badge(self) -> None:
         if not self._phase_queue:
@@ -633,16 +668,16 @@ class WerewolfGame:
                 LegalAction(
                     ActionType.SHERIFF_TRANSFER,
                     targets,
-                    description="Transfer the sheriff badge to a living player.",
+                    description="将警徽移交给一名存活玩家。",
                 )
             )
         legal_actions.append(
             LegalAction(
                 ActionType.SHERIFF_DESTROY,
-                description="Destroy the sheriff badge permanently.",
+                description="撕毁警徽，本局此后不再有警长。",
             )
         )
-        self._request_or_act(actor, tuple(legal_actions), "Transfer or destroy the sheriff badge.")
+        self._request_or_act(actor, tuple(legal_actions), "请选择移交警徽或撕毁警徽。")
 
     def _step_sheriff_order(self) -> None:
         if not self._phase_queue:
@@ -652,14 +687,14 @@ class WerewolfGame:
         legal = (
             LegalAction(
                 ActionType.SHERIFF_ORDER_CLOCKWISE,
-                description="Use clockwise speaking order.",
+                description="按顺时针方向依次发言。",
             ),
             LegalAction(
                 ActionType.SHERIFF_ORDER_COUNTERCLOCKWISE,
-                description="Use counterclockwise speaking order.",
+                description="按逆时针方向依次发言。",
             ),
         )
-        self._request_or_act(actor, legal, "Choose today's speaking direction.")
+        self._request_or_act(actor, legal, "请选择今天的发言方向。")
 
     def _step_discussion(self) -> None:
         if not self._phase_queue:
@@ -679,20 +714,20 @@ class WerewolfGame:
                     ActionType.SHERIFF_SUMMARIZE,
                     targets,
                     content_required=True,
-                    description="Summarize the discussion and nominate an elimination target.",
+                    description="总结讨论并指定本轮归票目标。",
                 ),
             )
-            self._request_or_act(actor, legal, "Summarize and nominate today's target.")
+            self._request_or_act(actor, legal, "请总结讨论并指定今天的归票目标。")
             return
         legal = (
             LegalAction(
                 ActionType.SPEAK,
                 targets,
                 content_required=True,
-                description="Make one public statement.",
+                description="发表一段公开发言。",
             ),
         )
-        self._request_or_act(actor, legal, "Give your public statement.")
+        self._request_or_act(actor, legal, "请发表你的公开发言。")
 
     def _step_vote(self) -> None:
         if not self._phase_queue:
@@ -706,8 +741,8 @@ class WerewolfGame:
         if not targets:
             self._phase_queue.pop(0)
             return
-        legal = (LegalAction(ActionType.VOTE, targets, description="Vote to eliminate one player."),)
-        self._request_or_act(actor, legal, "Cast your elimination vote.")
+        legal = (LegalAction(ActionType.VOTE, targets, description="投票放逐一名玩家。"),)
+        self._request_or_act(actor, legal, "请投出你的放逐票。")
 
     def _step_day_pk_speech(self) -> None:
         if not self._phase_queue:
@@ -720,10 +755,10 @@ class WerewolfGame:
                 ActionType.SPEAK,
                 targets,
                 content_required=True,
-                description="Give a public elimination runoff speech.",
+                description="发表公开的放逐PK发言。",
             ),
         )
-        self._request_or_act(actor, legal, "Give your elimination runoff speech.")
+        self._request_or_act(actor, legal, "请发表你的放逐PK发言。")
 
     def _step_hunter(self) -> None:
         if not self._phase_queue:
@@ -739,10 +774,10 @@ class WerewolfGame:
                 ActionType.HUNTER_SHOOT,
                 targets,
                 can_pass=True,
-                description="Shoot one living player, or pass.",
+                description="向一名存活玩家开枪，或选择不开枪。",
             ),
         )
-        self._request_or_act(actor, legal, "Choose whether to fire the hunter's shot.")
+        self._request_or_act(actor, legal, "请选择开枪目标或选择不开枪。")
 
     # ------------------------------------------------------------------
     # Decision handling
@@ -750,8 +785,23 @@ class WerewolfGame:
     def _request_or_act(
         self, actor_id: str, legal: Sequence[LegalAction], prompt: str
     ) -> None:
+        """为当前行动者创建输入请求，或驱动对应 AI Agent 完成一次决策。
+
+        完整 AI 决策链为：阶段处理器构造 ``legal`` → :meth:`observe` 生成
+        隔离视角 → Agent 更新自身记忆并调用角色规划器（可选调用 DeepSeek）→
+        将返回值标准化为 :class:`Action` → :meth:`_validate_action` 复核 →
+        :meth:`_consume_action` 修改裁判状态。引擎不读取 Agent 的长期记忆，也
+        不把其他角色私有信息注入提示词。
+
+        Agent/Provider 的任何异常、无法解析的模型输出或越权动作都在此处被
+        捕获。错误只对裁判日志可见，随后使用独立随机流产生合法兜底动作，
+        确保单个模型故障不会中断整局比赛。
+        """
+
         player = self.players[actor_id]
         if player.controller == "human":
+            # 人类控制器不经过 Agent。这里仅保存合法动作快照，HTTP 层稍后
+            # 提交时仍会按同一快照校验，因此不能利用阶段变化伪造动作。
             self.pending_action = PendingAction(
                 actor_id=actor_id,
                 phase=self.phase,
@@ -769,10 +819,14 @@ class WerewolfGame:
             )
             return
 
+        # 绝不把 ``self`` 或完整玩家表交给策略；Observation 是唯一输入面。
         observation = self.observe(actor_id, legal)
         try:
+            # 角色 Agent 内部负责“记忆更新 → 规划 → 可选大模型生成”；引擎只
+            # 关心最终动作协议，不与具体模型 SDK 或提示词耦合。
             action = self.agents[actor_id].decide(observation, self._agent_rngs[actor_id])
             if not isinstance(action, Action):
+                # 允许实验 Agent 返回字典，但必须先标准化再进入统一校验。
                 action = ensure_action(action, default_actor=actor_id)  # type: ignore[arg-type]
             self._validate_action(action, legal, actor_id)
         except Exception as exc:
@@ -789,6 +843,13 @@ class WerewolfGame:
     def _validate_action(
         self, action: Action, legal: Sequence[LegalAction], expected_actor: str
     ) -> None:
+        """按当前回合的白名单验证动作，拒绝模型或客户端的越权输出。
+
+        校验依次覆盖：行动者身份、动作类型、是否允许弃权、目标是否属于合法
+        集合、无目标动作是否夹带目标，以及发言/总结是否包含必要内容。这里是
+        状态变更前的最终信任边界，AI 动作与人类动作完全共用。
+        """
+
         if action.actor_id != expected_actor:
             raise InvalidAction(f"expected actor {expected_actor}, got {action.actor_id}")
         allowed = {item.action_type: item for item in legal}
@@ -820,9 +881,15 @@ class WerewolfGame:
             raise InvalidAction("this action requires non-empty content")
 
     def _safe_fallback(self, actor_id: str, legal: Sequence[LegalAction]) -> Action:
+        """在 Agent 失败时生成保守且必然合法的动作。
+
+        可弃权阶段优先弃权；必须选择目标时仅从裁判给出的目标集合中选择。
+        使用 ``_fallback_rngs`` 而非传给 Agent 的随机流，防止策略影响修复结果。
+        """
+
         rule = legal[0]
         if rule.action_type is ActionType.SPEAK:
-            return Action(actor_id, ActionType.SPEAK, content="I am still evaluating the available evidence.")
+            return Action(actor_id, ActionType.SPEAK, content="我还在分析目前可见的证据。")
         if rule.can_pass:
             return Action(actor_id, ActionType.PASS)
         target = (
@@ -831,13 +898,20 @@ class WerewolfGame:
             else None
         )
         content = (
-            "I am summarizing the public evidence and nominating this target."
+            "结合目前的公开证据，我建议大家归票到这位玩家。"
             if rule.content_required
             else None
         )
         return Action(actor_id, rule.action_type, target_id=target, content=content)
 
     def _consume_action(self, action: Action) -> None:
+        """消费一个已验证动作并将其写入状态机/事件流。
+
+        本方法假设动作已经通过 :meth:`_validate_action`；首先再次核对当前队首
+        行动者，然后才弹出队列并修改票型、技能资源或公开事件。将“生成动作”
+        与“变更状态”分离，可避免 DeepSeek/规划器直接触碰裁判内部数据。
+        """
+
         if not self._phase_queue or self._phase_queue[0] != action.actor_id:
             raise RuntimeError("action does not match the active turn")
         self._phase_queue.pop(0)
@@ -848,7 +922,7 @@ class WerewolfGame:
             wolves = tuple(self._alive_role_ids(Role.WEREWOLF))
             self._log(
                 "wolf_vote",
-                f"{self.players[action.actor_id].name} selected a night target.",
+                f"{self.players[action.actor_id].name}提交了今晚的击杀目标。",
                 actor_id=action.actor_id,
                 target_id=action.target_id,
                 data={"target_id": action.target_id},
@@ -868,7 +942,7 @@ class WerewolfGame:
             self._seer_results[action.actor_id][action.target_id] = result
             self._log(
                 "seer_check",
-                f"Your inspection of {self.players[action.target_id].name} returned {result}.",
+                f"你对{self.players[action.target_id].name}的查验结果是{'狼人' if result == Role.WEREWOLF.value else '好人'}。",
                 actor_id=action.actor_id,
                 target_id=action.target_id,
                 data={"result": result},
@@ -885,7 +959,7 @@ class WerewolfGame:
                 self._witch_used_this_night.add(action.actor_id)
                 self._log(
                     "witch_save",
-                    "You used the antidote.",
+                    "你使用了解药。",
                     actor_id=action.actor_id,
                     target_id=action.target_id,
                     visibility=(action.actor_id,),
@@ -893,7 +967,7 @@ class WerewolfGame:
             else:
                 self._log(
                     "witch_save_passed",
-                    "You kept the antidote.",
+                    "你保留了解药。",
                     actor_id=action.actor_id,
                     visibility=(action.actor_id,),
                 )
@@ -909,7 +983,7 @@ class WerewolfGame:
                 self._witch_used_this_night.add(action.actor_id)
                 self._log(
                     "witch_poison",
-                    f"You poisoned {self.players[action.target_id].name}.",
+                    f"你对{self.players[action.target_id].name}使用了毒药。",
                     actor_id=action.actor_id,
                     target_id=action.target_id,
                     visibility=(action.actor_id,),
@@ -917,7 +991,7 @@ class WerewolfGame:
             else:
                 self._log(
                     "witch_poison_passed",
-                    "You kept the poison.",
+                    "你保留了毒药。",
                     actor_id=action.actor_id,
                     visibility=(action.actor_id,),
                 )
@@ -1117,7 +1191,7 @@ class WerewolfGame:
             wolves = tuple(self._alive_role_ids(Role.WEREWOLF))
             self._log(
                 "wolf_target",
-                f"The pack selected {self.players[self._night_victim].name}.",
+                f"狼队决定今晚击杀{self.players[self._night_victim].name}。",
                 target_id=self._night_victim,
                 data={"tally": dict(tally)},
                 visibility=wolves,
@@ -1438,6 +1512,13 @@ class WerewolfGame:
         return [pid for pid in traversal if self.players[pid].alive] + [sheriff_id]
 
     def _enter_phase(self, phase: Phase) -> None:
+        """切换阶段并建立该阶段的行动队列与可见事件。
+
+        队列中的座位决定谁会依次进入 :meth:`_request_or_act`。夜间特殊角色
+        阶段只记录裁判可见的阶段事件；公开阶段才写入公共事件，从状态机源头
+        阻断旁观者通过日志判断隐藏身份。
+        """
+
         if self.status is GameStatus.FINISHED:
             return
         self.phase = phase
@@ -1631,6 +1712,13 @@ class WerewolfGame:
     def _players_view(
         self, viewer_id: Optional[str] = None, *, omniscient: bool = False
     ) -> list[dict[str, Any]]:
+        """投影玩家列表，并按请求者权限决定是否公开角色/阵营。
+
+        玩家始终能看到自己的身份；狼人能看到存活或死亡狼队友；按配置可公开
+        死者身份；对局结束或 ``omniscient=True`` 时才公开完整身份。普通公共
+        视角仅保留座位、存活状态、控制器和警长等公共事实。
+        """
+
         viewer = self.players.get(viewer_id) if viewer_id else None
         result: list[dict[str, Any]] = []
         for player in self.players.values():
@@ -1693,6 +1781,13 @@ class WerewolfGame:
         ]
 
     def _sanitize_speech_metadata(self, metadata: Mapping[str, Any]) -> dict[str, Any]:
+        """清洗 Agent 发言附带的结构化元数据。
+
+        大模型可以生成身份声明、指控、投票意向和警徽流，但这些字段仅作为
+        可观测战术声明，不能修改真实身份或技能结果。所有玩家引用必须属于本
+        局座位，警徽流目标数量也必须与单双夜模式一致；其余任意模型字段丢弃。
+        """
+
         allowed: dict[str, Any] = {}
         claim_role = metadata.get("claim_role")
         if claim_role is not None:
@@ -1763,19 +1858,23 @@ class WerewolfGame:
         data: Optional[Mapping[str, Any]] = None,
         visibility: Sequence[str] = ("public",),
     ) -> GameEvent:
-        event = GameEvent(
-            seq=len(self.events) + 1,
+        """写入带可见性标签的裁判事件。
+
+        ``visibility`` 默认公开，也可指定某个玩家、狼队或仅 ``observer``。
+        事件先以完整形态保存在裁判日志中，读取时再由 :meth:`event_log` 按视角
+        投影；评测与持久化使用全知日志，Agent 只能看到自己的过滤结果。
+        """
+
+        return self.logger.append(
             round=self.round,
             phase=self.phase.value,
             event_type=event_type,
             actor_id=actor_id,
             target_id=target_id,
             message=message,
-            data=dict(data or {}),
-            visibility=tuple(visibility),
+            data=data,
+            visibility=visibility,
         )
-        self.events.append(event)
-        return event
 
 
 # Concise aliases useful to callers that prefer a generic engine name.

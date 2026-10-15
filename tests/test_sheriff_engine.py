@@ -1,7 +1,8 @@
 import unittest
 
-from backend import ActionType, GameConfig, Phase, Role, WerewolfGame
-from backend.models import LegalAction
+from backend.game.models import ActionType, GameConfig, Phase, Role
+from backend.game.engine import WerewolfGame
+from backend.game.models import LegalAction
 
 
 ROLES = [

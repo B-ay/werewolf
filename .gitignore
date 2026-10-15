@@ -11,4 +11,5 @@ venv/
 *.log
 data/*.jsonl
 data/*.json
+data/evolution/
 !data/.gitkeep

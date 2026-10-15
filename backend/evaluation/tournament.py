@@ -1,79 +1,43 @@
-"""Batch tournament runner for the multi-agent Werewolf engine.
+"""多智能体狼人杀引擎的批量竞技与可复现实验入口。
 
-The module offers both a small Python API and a dependency-free JSON CLI::
+一场比赛并不是复用同一批有状态 Agent，而是为每个座位重新实例化策略；随后用
+固定 ``seed`` 驱动裁判随机流，并按局轮换不同版本的座位，减少角色与座次偏差。
+单局失败会被隔离并记录，不会默认丢弃整批实验。输出同时包含逐局评测、汇总和
+Elo 榜单。
 
-    python -m backend.tournament --seeds 1,2,3 --games-per-seed 2
+本模块同时提供 Python API 和不依赖第三方库的 JSON CLI::
 
-``TournamentRunner`` accepts an injectable ``game_factory`` so tournament
-orchestration can be tested independently of the concrete game engine.  The
-default adapter uses :class:`backend.engine.WerewolfGame`.
+    python -m backend.evaluation.tournament --seeds 1,2,3 --games-per-seed 2
+
+``TournamentRunner`` 接受可注入的 ``game_factory``，测试替身必须遵循同一
+run/result/event_log 接口；默认使用 :class:`backend.game.engine.WerewolfGame`。
 """
 
 from __future__ import annotations
 
 import argparse
 import copy
-from dataclasses import asdict, dataclass, field, is_dataclass
-from enum import Enum
-import inspect
+from dataclasses import dataclass, field
 import json
 from pathlib import Path
-import statistics
 import sys
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
-from .evaluation import build_leaderboard, evaluate_game
+from .evaluator import evaluate_game
+from .leaderboard import build_leaderboard
+from .common import _mean, _rate, _win_rates
+from ..agents.base import Agent
+from ..agents.factory import AgentFactory, create_agent
+from ..game.engine import WerewolfGame
+from ..game.models import GameConfig, Role
 
 
-GameFactory = Callable[..., Any]
+GameFactory = Callable[..., WerewolfGame]
 Evaluator = Callable[..., dict[str, Any]]
 
 
 class TournamentError(RuntimeError):
     """Raised when a scheduled game cannot produce a terminal result."""
-
-
-def _jsonable(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, Enum):
-        return value.value
-    if is_dataclass(value):
-        return _jsonable(asdict(value))
-    if isinstance(value, Mapping):
-        return {str(key): _jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set)):
-        return [_jsonable(item) for item in value]
-    if hasattr(value, "to_private_dict"):
-        return _jsonable(value.to_private_dict())
-    if hasattr(value, "to_dict"):
-        return _jsonable(value.to_dict())
-    if hasattr(value, "__dict__"):
-        return _jsonable(vars(value))
-    return str(value)
-
-
-def _status_value(value: Any) -> str:
-    if isinstance(value, Enum):
-        value = value.value
-    return str(value or "").strip().lower()
-
-
-def _call_supported(callable_object: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
-    """Call a hook with only keyword arguments declared by its signature."""
-
-    try:
-        signature = inspect.signature(callable_object)
-    except (TypeError, ValueError):
-        return callable_object(*args, **kwargs)
-    accepts_kwargs = any(
-        parameter.kind is inspect.Parameter.VAR_KEYWORD
-        for parameter in signature.parameters.values()
-    )
-    supported = kwargs if accepts_kwargs else {
-        key: value for key, value in kwargs.items() if key in signature.parameters
-    }
-    return callable_object(*args, **supported)
 
 
 @dataclass(frozen=True)
@@ -83,7 +47,11 @@ class Competitor:
     name: str
     model: str = "heuristic"
     version: str = "baseline"
-    factory: Callable[..., Any] | None = field(default=None, compare=False, repr=False)
+    factory: AgentFactory | None = field(default=None, compare=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.factory is not None and not callable(self.factory):
+            raise TypeError("competitor factory must be callable as factory(player_id, role); agent prototypes are unsupported")
 
     @property
     def key(self) -> str:
@@ -110,19 +78,14 @@ class Competitor:
                 version=parts[2] if len(parts) > 2 and parts[2] else "baseline",
             )
         if isinstance(value, Mapping):
-            name = value.get("name", value.get("agent", value.get("agent_id", f"agent-{index + 1}")))
             return cls(
-                name=str(name),
-                model=str(value.get("model", value.get("model_name", "heuristic"))),
-                version=str(value.get("version", value.get("agent_version", "baseline"))),
-                factory=value.get("factory", value.get("agent_factory")),
+                name=str(value.get("name", f"agent-{index + 1}")),
+                model=str(value.get("model", "heuristic")),
+                version=str(value.get("version", "baseline")),
+                factory=value.get("factory"),
             )
-        if callable(value) or hasattr(value, "decide"):
-            name = getattr(value, "__name__", value.__class__.__name__)
-            # Preserve explicit policy instances so the tournament adapter can
-            # clone their state.  Wrapping an instance in ``lambda: value``
-            # would silently reuse one long-term memory across seats/games.
-            return cls(str(name), factory=value)
+        if callable(value):
+            return cls(getattr(value, "__name__", type(value).__name__), factory=value)
         raise TypeError(f"unsupported competitor specification: {type(value).__name__}")
 
 
@@ -153,7 +116,7 @@ class TournamentConfig:
         return {
             "seeds": list(self.seeds),
             "games_per_seed": self.games_per_seed,
-            "game_config": _jsonable(self.game_config),
+            "game_config": copy.deepcopy(dict(self.game_config)),
             "competitors": [item.metadata() for item in self.competitors],
             "max_steps": self.max_steps,
             "rotate_seats": self.rotate_seats,
@@ -162,69 +125,26 @@ class TournamentConfig:
         }
 
 
-def _game_config_dict(value: Any) -> dict[str, Any]:
+def _game_config_dict(value: GameConfig | Mapping[str, Any] | None) -> dict[str, Any]:
     if value is None:
         return {}
+    if isinstance(value, GameConfig):
+        return value.to_dict()
     if isinstance(value, Mapping):
         return copy.deepcopy(dict(value))
-    if hasattr(value, "to_dict"):
-        result = value.to_dict()
-        if isinstance(result, Mapping):
-            return copy.deepcopy(dict(result))
-    if is_dataclass(value):
-        return copy.deepcopy(asdict(value))
-    raise TypeError("game_config must be a mapping, dataclass, or expose to_dict()")
+    raise TypeError("game_config must be GameConfig or a mapping")
 
 
-def _default_game_factory(config: Mapping[str, Any], **kwargs: Any) -> Any:
-    from .engine import WerewolfGame
-
-    return WerewolfGame(config, agent_factory=kwargs.get("agent_factory"))
-
-
-def _instantiate_agent(competitor: Competitor, player_id: str, role: Any) -> Any:
-    if competitor.factory is None:
-        from .agents import default_agent_factory
-
-        # Baseline seats use the concrete implementation for their assigned
-        # role, so every tournament participant keeps its own goal, memory,
-        # prompt, and planner instead of sharing the legacy generic policy.
-        return default_agent_factory(player_id, role)
-    factory = competitor.factory
-    if hasattr(factory, "decide") and not inspect.isclass(factory):
-        # Every seat in every game must own its policy state.  This is
-        # especially important now that role agents have persistent memories.
-        clone = getattr(factory, "clone", None)
-        if callable(clone):
-            candidate = clone()
-        else:
-            try:
-                candidate = copy.deepcopy(factory)
-            except Exception as exc:  # pragma: no cover - defensive API guard
-                raise TypeError(
-                    "stateful competitor instances must be deepcopy-able, expose clone(), "
-                    "or be supplied as a factory"
-                ) from exc
-        if candidate is factory:
-            raise TypeError("competitor clone() must return an independent policy instance")
-        return candidate
+def _instantiate_agent(competitor: Competitor, player_id: str, role: Role) -> Agent:
+    """固定两个参数的工厂；每个座位、每局必须创建独立 Agent。"""
+    factory = competitor.factory or create_agent
     try:
-        signature = inspect.signature(factory)
-    except (TypeError, ValueError):
-        return factory(player_id, role)
-    parameters = [
-        item
-        for item in signature.parameters.values()
-        if item.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
-    ]
-    required = [item for item in parameters if item.default is inspect.Parameter.empty]
-    has_varargs = any(item.kind is inspect.Parameter.VAR_POSITIONAL for item in signature.parameters.values())
-    names = {item.name for item in parameters}
-    if has_varargs or len(required) >= 2 or {"player_id", "role"}.issubset(names):
-        return factory(player_id, role)
-    if len(required) == 1 or names.intersection({"player_id", "pid", "actor_id"}):
-        return factory(player_id)
-    return factory()
+        agent = factory(player_id, role)
+    except TypeError as exc:
+        raise TypeError("competitor factory must accept (player_id, role)") from exc
+    if not isinstance(agent, Agent):
+        raise TypeError("competitor factory must return an Agent exposing decide()")
+    return agent
 
 
 def _seat_assignments(
@@ -246,103 +166,20 @@ def _seat_assignments(
     }
 
 
-def _extract_state(game: Any, run_result: Any = None) -> dict[str, Any]:
-    state: dict[str, Any] = {}
-    public_state = getattr(game, "public_state", None)
-    if callable(public_state):
-        value = _call_supported(public_state, viewer_id=None, omniscient=True)
-        if isinstance(_jsonable(value), Mapping):
-            state.update(_jsonable(value))
-    if isinstance(_jsonable(run_result), Mapping):
-        state.update(_jsonable(run_result))
-    result_method = getattr(game, "result", None)
-    if callable(result_method):
-        result = _jsonable(result_method())
-        if isinstance(result, Mapping):
-            state.update(result)
-    if "players" not in state:
-        players = getattr(game, "players", [])
-        if isinstance(players, Mapping):
-            state["players"] = [_jsonable(player) for player in players.values()]
-        else:
-            state["players"] = _jsonable(players)
-    if not state.get("winner"):
-        state["winner"] = _jsonable(getattr(game, "winner", None))
-    state.setdefault("status", _status_value(getattr(game, "status", "")))
-    return state
-
-
-def _extract_events(game: Any) -> list[dict[str, Any]]:
-    event_log = getattr(game, "event_log", None)
-    if callable(event_log):
-        values = _call_supported(event_log, viewer_id=None, omniscient=True)
-    elif event_log is not None:
-        values = event_log
-    else:
-        values = getattr(game, "events", [])
-    result = _jsonable(values) or []
-    return list(result) if isinstance(result, list) else []
-
-
-def _run_game(game: Any, max_steps: int) -> tuple[Any, int | None]:
-    run = getattr(game, "run", None)
-    if callable(run):
-        result = _call_supported(run, max_steps=max_steps)
-        return result, None
-
-    step = getattr(game, "step", None)
-    if not callable(step):
-        raise TournamentError("game exposes neither run() nor step()")
-    for steps in range(1, max_steps + 1):
-        result = step()
-        status = _status_value(getattr(game, "status", ""))
-        if status in {"finished", "complete", "completed", "ended", "game_over"}:
-            return result, steps
-        if status in {"waiting_for_human", "waiting", "paused"}:
-            raise TournamentError("autonomous tournament stopped waiting for human input")
-    return result, max_steps
-
-
-def _terminal_or_raise(game: Any, state: Mapping[str, Any], max_steps: int) -> None:
-    status = _status_value(state.get("status") or getattr(game, "status", ""))
-    winner = state.get("winner") or getattr(game, "winner", None)
-    if status in {"waiting_for_human", "waiting", "paused"}:
+def _run_game(game: WerewolfGame, max_steps: int) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """使用本项目引擎的确定接口，不猜测外部引擎或补出终局。"""
+    game.run(max_steps=max_steps)
+    state = game.result()
+    status = state["status"]
+    if status == "waiting_for_human":
         raise TournamentError("autonomous tournament stopped waiting for human input")
-    if status and status not in {"finished", "complete", "completed", "ended", "game_over"} and not winner:
+    if status != "finished":
         raise TournamentError(f"game did not finish within {max_steps} steps (status={status})")
-    if not status and not winner:
-        raise TournamentError("game did not expose a terminal status or winner")
+    return state, game.event_log(omniscient=True)
 
 
-def _participant_metadata(
-    players: Any,
-    seats: Mapping[str, Competitor],
-) -> dict[str, dict[str, str]]:
-    if isinstance(players, Mapping):
-        iterable = []
-        for key, value in players.items():
-            item = dict(value) if isinstance(value, Mapping) else {"id": key}
-            item.setdefault("id", key)
-            iterable.append(item)
-    elif isinstance(players, Iterable) and not isinstance(players, (str, bytes)):
-        iterable = [value if isinstance(value, Mapping) else {} for value in players]
-    else:
-        iterable = []
-    result: dict[str, dict[str, str]] = {}
-    ordered_seats = list(seats.values())
-    for index, player in enumerate(iterable):
-        player_id = str(player.get("id", player.get("player_id", f"p{index + 1}")))
-        competitor = seats.get(player_id)
-        if competitor is None and index < len(ordered_seats):
-            competitor = ordered_seats[index]
-        if competitor is not None:
-            result[player_id] = competitor.metadata()
-    return result
-
-
-def _mean(values: Iterable[Any]) -> float | None:
-    numeric = [float(value) for value in values if isinstance(value, (int, float)) and not isinstance(value, bool)]
-    return round(statistics.fmean(numeric), 4) if numeric else None
+def _participant_metadata(players: Sequence[Mapping[str, Any]], seats: Mapping[str, Competitor]) -> dict[str, dict[str, str]]:
+    return {str(player["id"]): seats[str(player["id"])].metadata() for player in players}
 
 
 def summarize_evaluations(
@@ -371,7 +208,7 @@ def summarize_evaluations(
         participant_metadata = evaluation.get("participant_metadata", {})
         for player_id, metric in evaluation.get("player_metrics", {}).items():
             participant = participant_metadata.get(player_id, {})
-            key = str(participant.get("leaderboard_key") or participant.get("agent_key") or player_id)
+            key = str(participant.get("leaderboard_key") or player_id)
             item = competitor_values.setdefault(
                 key,
                 {
@@ -403,15 +240,9 @@ def summarize_evaluations(
             "version": item["version"],
             "appearances": appearances,
             "wins": item["wins"],
-            "win_rate": round(item["wins"] / appearances, 4) if appearances else None,
+            "win_rate": _rate(item["wins"], appearances),
             "average_contribution_score": _mean(item["contribution_scores"]),
-            "roles": {
-                role: {
-                    **stats,
-                    "win_rate": round(stats["wins"] / stats["games"], 4) if stats["games"] else None,
-                }
-                for role, stats in sorted(item["roles"].items())
-            },
+            "roles": _win_rates(item["roles"]),
         }
 
     process_paths = {
@@ -431,10 +262,10 @@ def summarize_evaluations(
         "scheduled_games": scheduled,
         "completed_games": completed,
         "failed_games": len(failures),
-        "completion_rate": round(completed / scheduled, 4) if scheduled else None,
+        "completion_rate": _rate(completed, scheduled),
         "winner_counts": dict(sorted(winners.items())),
         "winner_rates": {
-            winner: round(count / completed, 4) if completed else None
+            winner: _rate(count, completed)
             for winner, count in sorted(winners.items())
         },
         "average_rounds": _mean(
@@ -450,14 +281,14 @@ def summarize_evaluations(
 
 
 class TournamentRunner:
-    """Run reproducible autonomous games and aggregate their evaluations."""
+    """运行可复现的纯 AI 对局，并聚合评测、失败记录和排行榜。"""
 
     def __init__(
         self,
         game_factory: GameFactory | None = None,
         evaluator: Evaluator = evaluate_game,
     ) -> None:
-        self.game_factory = game_factory or _default_game_factory
+        self.game_factory = game_factory or WerewolfGame
         self.evaluator = evaluator
 
     def run(
@@ -494,6 +325,8 @@ class TournamentRunner:
         failures: list[dict[str, Any]] = []
         schedule_index = 0
 
+        # 两层循环定义稳定赛程。相同 seed 可重复多局；若开启座位轮换，每一局都
+        # 根据 schedule_index 平移竞争者，避免某个版本长期绑定狼人或关键神职。
         for seed in config.seeds:
             for repetition in range(config.games_per_seed):
                 game_id = f"{config.tournament_id}-s{seed}-r{repetition + 1}"
@@ -506,23 +339,17 @@ class TournamentRunner:
                 seats = _seat_assignments(config.competitors, player_count, rotation)
 
                 def agent_factory(player_id: str, role: Any, assignments: Mapping[str, Competitor] = seats) -> Any:
+                    # 工厂在引擎洗牌完成后才知道 player_id 与 role。每次调用都必须
+                    # 返回独立策略实例，防止一局的记忆意外泄漏到另一座位或下一局。
                     competitor = assignments.get(player_id)
                     if competitor is None:
                         competitor = Competitor(f"baseline-{player_id}")
                     return _instantiate_agent(competitor, player_id, role)
 
                 try:
-                    game = _call_supported(
-                        self.game_factory,
-                        per_game_config,
-                        agent_factory=agent_factory,
-                        lineup={player_id: value.metadata() for player_id, value in seats.items()},
-                        game_id=game_id,
-                    )
-                    run_result, steps = _run_game(game, config.max_steps)
-                    state = _extract_state(game, run_result)
-                    _terminal_or_raise(game, state, config.max_steps)
-                    events = _extract_events(game)
+                    game = self.game_factory(per_game_config, agent_factory=agent_factory)
+                    state, events = _run_game(game, config.max_steps)
+                    steps = None  # 保留旧报告字段：同步 run() 不返回实际步数。
                     participant_metadata = _participant_metadata(state.get("players", []), seats)
                     evaluation = self.evaluator(
                         events,
@@ -535,7 +362,7 @@ class TournamentRunner:
                             "repetition": repetition + 1,
                             "schedule_index": schedule_index,
                             "steps": steps,
-                            "config": _jsonable(per_game_config),
+                            "config": per_game_config,
                         },
                     )
                     evaluation["participant_metadata"] = participant_metadata
@@ -551,6 +378,8 @@ class TournamentRunner:
                         }
                     )
                 except Exception as exc:
+                    # 失败是研究数据的一部分：保留 seed、局号和错误类型，默认继续
+                    # 后续赛程；只有 fail_fast=True 时才立即向调用者抛出。
                     failure = {
                         "game_id": game_id,
                         "seed": seed,
